@@ -1,0 +1,38 @@
+# Local toolchains
+.build-tools/
+
+# .NET
+**/bin/
+**/obj/
+artifacts/
+*.user
+*.suo
+.vs/
+
+# Android / Gradle
+**/.gradle/
+**/.kotlin/
+**/build/
+local.properties
+keystore.properties
+*.jks
+*.keystore
+*.pfx
+*.p12
+*.pem
+*.key
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets and local environment
+.env
+.env.*
+
+# Keep only stable release artifacts in Git
+dist/*
+!dist/ClipBridge-Windows-v1.2.1.zip
+!dist/ClipBridge-Android-v1.2.1.apk

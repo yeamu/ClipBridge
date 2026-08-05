@@ -1,0 +1,11 @@
+<Window x:Class="ClipBridge.Windows.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="ClipBridge 1.2.1" Height="330" Width="470" ResizeMode="NoResize">
+  <Grid Margin="28"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="18"/><RowDefinition Height="Auto"/><RowDefinition Height="18"/><RowDefinition Height="Auto"/><RowDefinition Height="28"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+    <TextBlock Text="ClipBridge" FontSize="28" FontWeight="SemiBold"/><TextBlock Grid.Row="2" Text="Windows 局域网 IP"/><TextBox x:Name="LocalIpBox" Grid.Row="2" Margin="170,0,0,0" IsReadOnly="True"/>
+    <TextBlock Grid.Row="4" Text="配对码（至少 4 位）"/><PasswordBox x:Name="PairingCodeBox" Grid.Row="4" Margin="170,0,0,0"/>
+    <StackPanel Grid.Row="6" Orientation="Horizontal">
+      <Button x:Name="StartButton" Content="开始同步" Width="110" Click="StartButton_Click"/>
+      <Button x:Name="AutoStartButton" Margin="12,0,0,0" Width="140" Click="AutoStartButton_Click"/>
+    </StackPanel>
+    <TextBlock x:Name="StatusText" Grid.Row="7" Margin="0,18,0,0" TextWrapping="Wrap" Foreground="DimGray" Text="尚未启动。两端填入相同配对码后开始；连接后复制一段新文字测试。"/>
+  </Grid>
+</Window>

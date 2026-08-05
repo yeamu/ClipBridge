@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <application android:theme="@style/Theme.ClipBridge" android:label="ClipBridge" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:usesCleartextTraffic="true">
+        <activity android:name=".MainActivity" android:screenOrientation="unspecified" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
+        <activity android:name=".SyncNowActivity" android:theme="@style/Theme.ClipBridge.SyncNow" android:taskAffinity="com.clipbridge.quicksync" android:excludeFromRecents="true" android:noHistory="true" android:exported="false" />
+        <service android:name=".ClipBridgeForegroundService" android:foregroundServiceType="dataSync" android:exported="false" />
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="com.clipbridge.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/clipbridge_paths" /></provider>
+    </application>
+</manifest>
