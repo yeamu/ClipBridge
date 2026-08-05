@@ -4,6 +4,8 @@
   <img src="assets/icons/clipbridge-512.png" width="128" alt="ClipBridge icon">
 </p>
 
+[中文](#clipbridge) | [English](#english)
+
 ClipBridge 是一个局域网剪贴板同步工具。目前支持 Windows 与 Android 双向同步文字和图片，macOS 26+ 版本的开发说明见 [MACOS_HANDOFF.md](MACOS_HANDOFF.md)。
 
 当前稳定版本：**1.2.1**
@@ -161,3 +163,106 @@ macOS 端尚未提交实现。计划使用 SwiftUI、AppKit、Network.framework 
 ## 许可证
 
 本项目以 [MIT License](LICENSE) 开源。
+
+---
+
+## English
+
+ClipBridge is a LAN clipboard synchronization tool for bidirectional text and single-image sync between Windows and Android. The macOS 26+ implementation handoff is available in [MACOS_HANDOFF.md](MACOS_HANDOFF.md).
+
+Current stable version: **1.2.1**
+
+### Features
+
+- Bidirectional plain-text and single-image clipboard sync between Windows and Android.
+- Original image size limit: 20 MB. Supported formats: PNG, JPG/JPEG/JFIF, BMP, GIF, TIFF, WebP, HEIC/HEIF, AVIF, and ICO.
+- When an original file or URI is available, its bytes are transferred directly without decoding or transcoding. Animated GIFs retain all frames.
+- Only bitmap-only clipboard data is encoded as PNG; when that exceeds 20 MB, high-quality JPEG is attempted automatically.
+- One TCP connection carries both directions, with HMAC-SHA256 pairing-code and message-integrity verification.
+- Windows uses native clipboard events, stays in the system tray after minimizing or closing the window, and can auto-start for the current user.
+- Android uses a foreground service and offers a notification action to sync the current clipboard.
+- Messages are processed in FIFO order with a maximum of 20 pending items. Remote-origin markers and message UUIDs prevent feedback loops.
+
+### Downloads
+
+- [GitHub Releases](https://github.com/yeamu/ClipBridge/releases/latest)
+- [Windows 1.2.1 ZIP](dist/ClipBridge-Windows-v1.2.1.zip)
+- [Android 1.2.1 APK](dist/ClipBridge-Android-v1.2.1.apk)
+
+The Windows package requires the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0). The Android APK is signed with a Release keystore. The private key is not in this repository, and future updates must use the same keystore.
+
+If you previously installed a Debug-signed build, uninstall it before installing the Release APK for the first time. Android does not allow an APK signed by another certificate to replace it, and uninstalling clears the saved Windows IP address and pairing code.
+
+### Quick start
+
+#### Windows
+
+1. Extract `ClipBridge-Windows-v1.2.1.zip` and run `ClipBridge.Windows.exe`.
+2. Note the LAN IPv4 address displayed in the window.
+3. Enter a pairing code with at least four characters and click **Start sync**.
+4. Allow private-network access when Windows Firewall asks.
+
+Minimizing or closing the window keeps ClipBridge running in the system tray. Double-click the tray icon to restore the window; choose **Exit** in the tray menu to stop it. You can enable auto-start after entering a pairing code. The code is stored in a form decryptable only by the current Windows user.
+
+#### Android
+
+1. Install `ClipBridge-Android-v1.2.1.apk`.
+2. Enter the Windows LAN IPv4 address and the same pairing code.
+3. Tap **Start sync** and grant notification permission.
+4. After copying content in another app, open the notification shade and tap **Sync current clipboard**. Returning to ClipBridge after copying can also trigger synchronization.
+
+### Android clipboard limitations
+
+On Android 10 and later, regular background apps cannot read other apps' clipboards. ClipBridge can read only the current system `primaryClip`; it cannot bulk-read private clipboard histories maintained by Samsung Keyboard or other IMEs.
+
+- If you copy A, B, and C and synchronize only once, only the latest item, C, can be sent.
+- Synchronize after each copy to send A, B, and C in order.
+- Content received from Windows is written to the Android system clipboard in order. Whether an IME retains it is controlled by that IME.
+- Fully automatic background capture requires implementing and enabling ClipBridge as the default keyboard; version 1.2.1 does not include that mode.
+
+### Network and security
+
+- Both devices must be on the same LAN and client isolation must be disabled.
+- TCP port `45837` must be reachable. Android initiates the connection; the desktop side keeps one active Android connection.
+- Every message is authenticated with HMAC-SHA256. See [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
+- Four characters are only the minimum. Use a random pairing code of at least eight characters.
+- Payloads are not encrypted in version 1.2.1. HMAC provides authentication and integrity, not confidentiality. Use ClipBridge only on trusted LANs and never expose its TCP port to the public internet.
+
+### Build from source
+
+#### Windows
+
+Requirements: Windows 10/11 and the .NET 8 SDK.
+
+```powershell
+dotnet build windows\ClipBridge.Windows\ClipBridge.Windows.csproj -c Release
+dotnet publish windows\ClipBridge.Windows\ClipBridge.Windows.csproj `
+  -c Release `
+  -o artifacts\windows
+```
+
+#### Android
+
+Requirements: JDK 17 and Android SDK 35.
+
+```powershell
+cd android
+.\gradlew.bat :app:assembleDebug
+```
+
+On macOS/Linux, use `./gradlew :app:assembleDebug`. The Debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+Before building a Release APK, copy `android/keystore.properties.example` to `android/keystore.properties` and provide the local keystore path, alias, and passwords. Both that file and keystores are ignored by Git.
+
+```powershell
+cd android
+.\gradlew.bat :app:assembleRelease
+```
+
+The Release APK is written to `android/app/build/outputs/apk/release/app-release.apk`.
+
+### macOS and license
+
+The macOS implementation has not been committed yet. It is planned as a macOS 26.0+ app using SwiftUI, AppKit, Network.framework, and CryptoKit. See [MACOS_HANDOFF.md](MACOS_HANDOFF.md) for the full handoff.
+
+ClipBridge is released under the [MIT License](LICENSE).
