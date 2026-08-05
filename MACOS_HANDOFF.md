@@ -5,7 +5,7 @@
 
 ## 1. 交接状态
 
-macOS 端尚未创建源码。Windows 与 Android 1.2.1 已完成文字、原始图片和 GIF 动画双向同步，可作为 macOS 端联调基准。
+macOS 端尚未创建源码。Windows 与 Android 1.2.2 已完成文字、原始图片和 GIF 动画双向同步，可作为 macOS 端联调基准。
 
 请在安装了 Xcode 26、运行 macOS 26 或更高版本的 Mac 上继续。当前 Windows 环境无法编译、签名或运行 macOS `.app`。
 
@@ -25,13 +25,13 @@ Apple 的 PackageDescription 6.2 已提供 `.macOS(.v26)`：
 
 ## 2. 当前可兼容版本
 
-- Windows：`dist/ClipBridge-Windows-v1.2.1.zip`
-- Android：`dist/ClipBridge-Android-v1.2.1.apk`
+- Windows：`dist/ClipBridge-Windows-v1.2.2.zip`
+- Android：`dist/ClipBridge-Android-v1.2.2.apk`
 - Android application ID：`com.clipbridge`
 - TCP 端口：`45837`
 - 配对码：至少 4 位
 - 当前握手协议版本：v1
-- 当前应用版本：1.2.1
+- 当前应用版本：1.2.2
 - 同步类型：纯文本与图片
 - 图片原始二进制上限：20 MB
 
@@ -320,7 +320,7 @@ Apple 文档：
 - Finder 复制单张受支持图片：优先读取 `.fileURL`，直接发送文件 Data。
 - 其他应用复制图片：依次尝试 `UTType.png`、`UTType.jpeg`、`UTType.gif`、`UTType.heic` 等原始 Data。
 - 只存在 `NSImage`/TIFF 表示时才进入 PNG/JPEG 兜底编码。
-- 一次只同步一张图片；多个文件暂不进入 v1.2.1 协议。
+- 一次只同步一张图片；多个文件暂不进入 v1.2.2 协议。
 
 ### `ClipboardWriter.swift`
 
@@ -469,7 +469,7 @@ xcodebuild \
 1. Mac 与 Android 连接同一 Wi-Fi。
 2. Mac 启动 ClipBridge，填写至少 4 位配对码并开始同步。
 3. 记下 Mac 界面显示的 IPv4。
-4. Android 安装 `ClipBridge-Android-v1.2.1.apk`。
+4. Android 安装 `ClipBridge-Android-v1.2.2.apk`。
 5. Android 填入 Mac IPv4 和相同配对码。
 6. Android 点击开始同步并允许通知权限。
 7. 确认双方显示握手验证成功。
@@ -526,7 +526,7 @@ xcodebuild \
 请先完整阅读仓库根目录 MACOS_HANDOFF.md 和 protocol/PROTOCOL.md。
 在 macos/ClipBridgeMac/ 创建原生 SwiftUI macOS App，最低支持 macOS 26.0。
 严格复用现有 ClipBridge v1 TCP/HMAC 协议，Mac 作为 45837 TCP 服务端，
-与当前 Android v1.2.1 APK 兼容。实现菜单栏常驻、主设置窗口、
+与当前 Android v1.2.2 APK 兼容。实现菜单栏常驻、主设置窗口、
 至少 4 位配对码、单客户端握手认证、单 writer、FIFO 20 条、
 NSPasteboard.changeCount 监听、远端来源标记与防回写循环。
 实现文字与单张图片双向同步：原始图片上限 20 MB，支持

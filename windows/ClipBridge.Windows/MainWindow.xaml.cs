@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows;
 using System.IO;
 using System.Net;
@@ -13,6 +15,8 @@ namespace ClipBridge.Windows;
 public partial class MainWindow : Window
 {
     private const int WmClipboardUpdate = 0x031D;
+    private const int ClipboardPort = 45837;
+    private const string FirewallRuleName = "ClipBridge Private LAN TCP 45837";
     private ClipboardSyncService? _sync;
     private HwndSource? _windowSource;
     private IntPtr _windowHandle;
@@ -105,8 +109,83 @@ public partial class MainWindow : Window
     {
         if (PairingCodeBox.Password.Length < 4) { StatusText.Text = "配对码至少需要 4 位。"; return; }
         if (_sync is not null) { await _sync.StopAsync(); _sync = null; StartButton.Content = "开始同步"; StatusText.Text = "已停止。"; return; }
+
+        StatusText.Text = "正在检查 Windows 防火墙…";
+        var firewallResult = await Task.Run(EnsurePrivateFirewallRule);
+        if (firewallResult == FirewallRuleResult.Declined)
+        {
+            StatusText.Text = "未授予防火墙权限，Android 无法从局域网连接。再次点击“开始同步”可重试。";
+            return;
+        }
+        if (firewallResult == FirewallRuleResult.Failed)
+        {
+            StatusText.Text = "无法创建防火墙规则。请以管理员身份运行，或允许专用网络 TCP 45837 入站连接。";
+            return;
+        }
+
         SavePairingCode(PairingCodeBox.Password);
         await StartSyncAsync();
+    }
+
+    private static FirewallRuleResult EnsurePrivateFirewallRule()
+    {
+        if (HasPrivateFirewallRule()) return FirewallRuleResult.AlreadyAllowed;
+
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "netsh.exe",
+                Arguments =
+                    $"advfirewall firewall add rule name=\"{FirewallRuleName}\" " +
+                    $"dir=in action=allow protocol=TCP localport={ClipboardPort} profile=private enable=yes",
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+            if (process is null) return FirewallRuleResult.Failed;
+            process.WaitForExit();
+            return process.ExitCode == 0 ? FirewallRuleResult.Added : FirewallRuleResult.Failed;
+        }
+        catch (Win32Exception exception) when (exception.NativeErrorCode == 1223)
+        {
+            return FirewallRuleResult.Declined;
+        }
+        catch
+        {
+            return FirewallRuleResult.Failed;
+        }
+    }
+
+    private static bool HasPrivateFirewallRule()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "netsh.exe",
+                Arguments = $"advfirewall firewall show rule name=\"{FirewallRuleName}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true,
+            });
+            if (process is null) return false;
+            var output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+            return process.ExitCode == 0 && output.Contains(FirewallRuleName, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private enum FirewallRuleResult
+    {
+        AlreadyAllowed,
+        Added,
+        Declined,
+        Failed,
     }
 
     private async Task StartSyncAsync()
