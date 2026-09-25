@@ -45,7 +45,7 @@ Android APK 使用 Release keystore 签名，可用于正式分发。签名私�
 
 1. 解压 `ClipBridge-Windows-v1.2.2.zip`。
 2. 运行 `ClipBridge.Windows.exe`。
-3. 记下窗口中显示的 Windows 局域网 IPv4。
+3. 确认窗口中的 Windows 局域网 IPv4；可手动修改为本机其他网卡的 IPv4（例如 Wi-Fi 或有线网卡），Android 端填写相同地址。程序会监听此地址并保存选择；修改前请先停止同步。若更换网络后原地址失效，请填写新的本机 IP。
 4. 输入至少 4 位配对码，点击“开始同步”。
 5. 首次启动会弹出 Windows 管理员授权；选择“是”后，ClipBridge 会自动允许“专用网络”的 TCP 45837 入站连接。
 
@@ -198,7 +198,7 @@ If you previously installed a Debug-signed build, uninstall it before installing
 #### Windows
 
 1. Extract `ClipBridge-Windows-v1.2.2.zip` and run `ClipBridge.Windows.exe`.
-2. Note the LAN IPv4 address displayed in the window.
+2. Confirm or edit the LAN IPv4 address to select a local Windows network adapter. Enter the same address on Android. The app listens on and saves this address; stop sync before changing it. Update it if the address changes after switching networks.
 3. Enter a pairing code with at least four characters and click **Start sync**.
 4. On the first start, approve the Windows administrator prompt. ClipBridge then automatically creates a private-network inbound TCP 45837 firewall rule.
 

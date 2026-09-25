@@ -29,11 +29,13 @@ public partial class MainWindow : Window
         "ClipBridge",
         "pairing-code.bin");
 
+    private static readonly string LocalIpPath = Path.Combine(Path.GetDirectoryName(SettingsPath)!, "local-ip.txt");
+
     public MainWindow()
     {
         InitializeComponent();
         _trayIcon = CreateTrayIcon();
-        LocalIpBox.Text = Dns.GetHostAddresses(Dns.GetHostName())
+        LocalIpBox.Text = LoadLocalIp() ?? Dns.GetHostAddresses(Dns.GetHostName())
             .FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address))
             ?.ToString() ?? "请用 ipconfig 查询";
         PairingCodeBox.Password = LoadPairingCode();
@@ -49,8 +51,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            await StartSyncAsync();
-            HideToTray();
+            if (await StartSyncAsync()) HideToTray();
         };
     }
 
@@ -107,24 +108,36 @@ public partial class MainWindow : Window
 
     private async void StartButton_Click(object sender, RoutedEventArgs e)
     {
-        if (PairingCodeBox.Password.Length < 4) { StatusText.Text = "配对码至少需要 4 位。"; return; }
-        if (_sync is not null) { await _sync.StopAsync(); _sync = null; StartButton.Content = "开始同步"; StatusText.Text = "已停止。"; return; }
-
-        StatusText.Text = "正在检查 Windows 防火墙…";
-        var firewallResult = await Task.Run(EnsurePrivateFirewallRule);
-        if (firewallResult == FirewallRuleResult.Declined)
+        StartButton.IsEnabled = false;
+        try
         {
-            StatusText.Text = "未授予防火墙权限，Android 无法从局域网连接。再次点击“开始同步”可重试。";
-            return;
+            if (_sync is not null)
+            {
+                await _sync.StopAsync();
+                _sync = null;
+                LocalIpBox.IsEnabled = true;
+                PairingCodeBox.IsEnabled = true;
+                StartButton.Content = "开始同步";
+                StatusText.Text = "已停止，可修改 IP 后重新开始同步。";
+                return;
+            }
+            if (!TryGetLocalAddress(out _)) return;
+            if (PairingCodeBox.Password.Length < 4) { StatusText.Text = "配对码至少需要 4 位。"; return; }
+            StatusText.Text = "正在检查 Windows 防火墙…";
+            var firewallResult = await Task.Run(EnsurePrivateFirewallRule);
+            if (firewallResult == FirewallRuleResult.Declined)
+            {
+                StatusText.Text = "未授予防火墙权限，Android 无法从局域网连接。再次点击“开始同步”可重试。";
+                return;
+            }
+            if (firewallResult == FirewallRuleResult.Failed)
+            {
+                StatusText.Text = "无法创建防火墙规则。请以管理员身份运行，或允许专用网络 TCP 45837 入站连接。";
+                return;
+            }
+            await StartSyncAsync();
         }
-        if (firewallResult == FirewallRuleResult.Failed)
-        {
-            StatusText.Text = "无法创建防火墙规则。请以管理员身份运行，或允许专用网络 TCP 45837 入站连接。";
-            return;
-        }
-
-        SavePairingCode(PairingCodeBox.Password);
-        await StartSyncAsync();
+        finally { StartButton.IsEnabled = true; }
     }
 
     private static FirewallRuleResult EnsurePrivateFirewallRule()
@@ -188,11 +201,59 @@ public partial class MainWindow : Window
         Failed,
     }
 
-    private async Task StartSyncAsync()
+    private bool TryGetLocalAddress(out IPAddress address)
     {
-        _sync = new ClipboardSyncService(PairingCodeBox.Password, s =>
+        address = IPAddress.None;
+        var input = LocalIpBox.Text.Trim();
+        if (input.Split('.').Length != 4 || !IPAddress.TryParse(input, out var parsed)
+            || parsed.AddressFamily != AddressFamily.InterNetwork
+            || IPAddress.IsLoopback(parsed) || parsed.Equals(IPAddress.Any)
+            || parsed.Equals(IPAddress.Broadcast))
+        {
+            StatusText.Text = "请输入本机网卡的有效局域网 IPv4 地址。";
+            return false;
+        }
+        if (!System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .SelectMany(adapter => adapter.GetIPProperties().UnicastAddresses)
+            .Any(unicast => unicast.Address.Equals(parsed)))
+        {
+            StatusText.Text = "该 IP 不属于本机网卡，请填写 Windows 当前的局域网 IPv4 地址。";
+            return false;
+        }
+        address = parsed;
+        return true;
+    }
+
+    private static string? LoadLocalIp()
+    {
+        try { return File.Exists(LocalIpPath) ? File.ReadAllText(LocalIpPath).Trim() : null; }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    private async Task<bool> StartSyncAsync()
+    {
+        if (!TryGetLocalAddress(out var address)) return false;
+        var service = new ClipboardSyncService(PairingCodeBox.Password, s =>
             Dispatcher.BeginInvoke(() => StatusText.Text = s));
-        await _sync.StartAsync(); StartButton.Content = "停止同步";
+        try
+        {
+            await service.StartAsync(address);
+            SavePairingCode(PairingCodeBox.Password);
+            File.WriteAllText(LocalIpPath, address.ToString());
+            _sync = service;
+            LocalIpBox.Text = address.ToString();
+            LocalIpBox.IsEnabled = false;
+            PairingCodeBox.IsEnabled = false;
+            StartButton.Content = "停止同步";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            await service.StopAsync();
+            StatusText.Text = $"启动失败：{exception.Message}";
+            return false;
+        }
     }
 
     private void AutoStartButton_Click(object sender, RoutedEventArgs e)
@@ -213,7 +274,9 @@ public partial class MainWindow : Window
                     StatusText.Text = "请先输入至少 4 位配对码，再开启开机自动启动。";
                     return;
                 }
+                if (!TryGetLocalAddress(out var address)) return;
                 SavePairingCode(PairingCodeBox.Password);
+                File.WriteAllText(LocalIpPath, address.ToString());
                 var executablePath = Environment.ProcessPath
                     ?? throw new InvalidOperationException("无法确定程序路径。");
                 runKey.SetValue(StartupValueName, $"\"{executablePath}\" --auto-start", RegistryValueKind.String);

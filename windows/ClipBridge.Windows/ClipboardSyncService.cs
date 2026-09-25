@@ -23,6 +23,8 @@ public sealed class ClipboardSyncService
     private readonly ClipboardActor _clipboardActor;
     private TcpClient? _activeClient;
     private volatile string? _lastText;
+    private TcpListener? _listener;
+    private Task? _acceptTask;
     public ClipboardSyncService(string code, Action<string> status)
     {
         _code = code;
@@ -31,14 +33,19 @@ public sealed class ClipboardSyncService
         _ = SendLoopAsync();
     }
 
-    public async Task StartAsync()
+    public Task StartAsync(IPAddress localAddress)
     {
-        _ = AcceptLoopAsync();
-        _status("已启动，正在等待 Android 连接…"); await Task.CompletedTask;
+        _listener = new TcpListener(localAddress, Port);
+        _listener.Start();
+        _acceptTask = AcceptLoopAsync(_listener);
+        _status($"已启动，正在 {localAddress}:{Port} 等待 Android 连接…");
+        return Task.CompletedTask;
     }
     public async Task StopAsync()
     {
         _cts.Cancel();
+        if (_acceptTask is not null) await _acceptTask;
+        _listener?.Stop();
         _outbound.Writer.TryComplete();
         TcpClient[] clients;
         lock (_clients)
@@ -54,9 +61,8 @@ public sealed class ClipboardSyncService
     }
     public void NotifyClipboardChanged() => _clipboardActor.RequestRead();
 
-    private async Task AcceptLoopAsync()
+    private async Task AcceptLoopAsync(TcpListener listener)
     {
-        var listener = new TcpListener(IPAddress.Any, Port); listener.Start();
         try { while (!_cts.IsCancellationRequested) { var client = await listener.AcceptTcpClientAsync(_cts.Token); AddClient(client); } } catch (OperationCanceledException) { } finally { listener.Stop(); }
     }
     private void AddClient(TcpClient client)
