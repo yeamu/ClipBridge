@@ -45,15 +45,21 @@ object QuickSyncNotification {
         return android.app.Notification.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_stat_clipbridge)
             .setLargeIcon(BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher))
-            .setContentTitle("ClipBridge 已就绪")
-            .setContentText("复制后点“同步当前剪贴板”")
-            .setContentIntent(openApp)
+            .setContentTitle("点击同步到电脑")
+            .setContentIntent(action)
             .setOngoing(true)
             .addAction(
                 android.app.Notification.Action.Builder(
                     Icon.createWithResource(context, R.drawable.ic_stat_clipbridge),
-                    "同步当前剪贴板",
+                    "同步到电脑",
                     action,
+                ).build(),
+            )
+            .addAction(
+                android.app.Notification.Action.Builder(
+                    Icon.createWithResource(context, R.drawable.ic_stat_clipbridge),
+                    "打开设置",
+                    openApp,
                 ).build(),
             )
             .build()

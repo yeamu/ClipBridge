@@ -69,7 +69,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }) { Text(if (running) "停止同步" else "开始同步") }
                 HorizontalDivider(); Text(status, style = MaterialTheme.typography.bodyMedium)
-                Text("开始同步后会默认启用通知栏“同步当前剪贴板”。Android 系统限制普通后台应用直接读取剪贴板。", style = MaterialTheme.typography.bodySmall)
+                Text("复制后直接点按 ClipBridge 通知即可同步，无需展开；展开通知可打开设置。Android 系统限制普通后台应用直接读取剪贴板。", style = MaterialTheme.typography.bodySmall)
             } } }
         }
     }

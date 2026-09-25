@@ -8,7 +8,9 @@
 
 ClipBridge 是一个局域网剪贴板同步工具。目前支持 Windows 与 Android 双向同步文字和图片，macOS 26+ 版本的开发说明见 [MACOS_HANDOFF.md](MACOS_HANDOFF.md)。
 
-当前稳定版本：**1.2.2**
+当前稳定版本：**1.2.3**
+
+1.2.3 Android 使用新的正式签名和安装标识 `com.clipbridge.app`，独立安装，不覆盖旧版或测试版；首次启动请重新填写 Windows IP 和配对码。确认新版正常后可卸载旧版及测试版。
 
 ## 功能
 
@@ -24,26 +26,26 @@ ClipBridge 是一个局域网剪贴板同步工具。目前支持 Windows 与 An
 - Windows 最小化或关闭窗口后驻留系统托盘
 - Windows 可开启当前用户登录后的自动启动；配对码仅以 Windows 当前用户加密形式保存
 - Android 使用前台服务维持连接
-- Android 通知栏提供“同步当前剪贴板”按钮
+- Android 直接点按通知即可同步当前剪贴板，无需展开；展开后也可点击同步按钮或打开设置
 - Android 已捕获的待发送文本、Windows 收到的待写文本均按 FIFO 顺序处理，队列最多保留 20 条
 - 远端来源标记和消息 UUID 防止循环回写
 
 ## 下载
 
-- [ClipBridge Windows 1.2.2](dist/ClipBridge-Windows-v1.2.2.zip)
-- [ClipBridge Android 1.2.2](dist/ClipBridge-Android-v1.2.2.apk)
+- [ClipBridge Windows 1.2.3](dist/ClipBridge-Windows-v1.2.3.zip)
+- [ClipBridge Android 1.2.3](dist/ClipBridge-Android-v1.2.3.apk)
 
 Windows 包是 .NET 8 框架依赖版本，需要安装 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)。
 
 Android APK 使用 Release keystore 签名，可用于正式分发。签名私钥不在仓库中；必须妥善备份，后续版本需要使用同一把 keystore 才能覆盖升级。
 
-若已安装此前的 Debug 签名测试包，首次安装此 Release 版前需要先卸载旧包；这是 Android 对不同签名证书的安全要求，卸载会清除应用内保存的 Windows IP 和配对码。
+此前测试包与此正式版独立安装；不要同时开启两个版本的同步服务。后续正式版将沿用新签名和安装标识，以支持覆盖升级。
 
 ## 使用方法
 
 ### Windows
 
-1. 解压 `ClipBridge-Windows-v1.2.2.zip`。
+1. 解压 `ClipBridge-Windows-v1.2.3.zip`。
 2. 运行 `ClipBridge.Windows.exe`。
 3. 确认窗口中的 Windows 局域网 IPv4；可手动修改为本机其他网卡的 IPv4（例如 Wi-Fi 或有线网卡），Android 端填写相同地址。程序会监听此地址并保存选择；修改前请先停止同步。若更换网络后原地址失效，请填写新的本机 IP。
 4. 输入至少 4 位配对码，点击“开始同步”。
@@ -55,10 +57,10 @@ Android APK 使用 Release keystore 签名，可用于正式分发。签名私�
 
 ### Android
 
-1. 安装 `ClipBridge-Android-v1.2.2.apk`。
+1. 安装 `ClipBridge-Android-v1.2.3.apk`。
 2. 填写 Windows 的局域网 IPv4 和相同配对码。
 3. 点击“开始同步”并允许通知权限；通知栏“一键同步当前剪贴板”会默认启用。
-4. 在其他应用复制文字后，下拉通知栏并点击“同步当前剪贴板”。
+4. 在其他应用复制文字或图片后，下拉通知栏，直接点按 ClipBridge 通知即可同步，无需点击小三角展开。展开后仍可点击“同步到电脑”，或选择“打开设置”返回主界面。
 
 Android 10+ 不允许普通后台应用读取其他应用的剪贴板。ClipBridge 在获得输入焦点时可以读取当前剪贴板，因此也可以在复制后返回 ClipBridge 完成同步。
 
@@ -72,7 +74,7 @@ Android 普通应用只能读取当前 `primaryClip`，不能读取三星或其�
 - 每次复制后都点击一次“一键同步”，A、B、C 会按顺序发送；若 Windows 已启用 `Win+V` 剪贴板历史，通常会被系统记录。
 - Windows 发往 Android 的内容会依次写入 Android 系统剪贴板；输入法是否长期保留由输入法自身决定。
 
-要在 Android 上做到完全后台自动捕获，需要把应用实现为并启用为默认输入法；1.2.2 版本不包含此模式。
+要在 Android 上做到完全后台自动捕获，需要把应用实现为并启用为默认输入法；1.2.3 版本不包含此模式。
 
 ## 网络要求
 
@@ -86,7 +88,7 @@ Android 普通应用只能读取当前 `primaryClip`，不能读取三星或其�
 
 每条消息带有 HMAC-SHA256，用于验证配对码并检测内容篡改。协议详情见 [protocol/PROTOCOL.md](protocol/PROTOCOL.md)。
 
-4 位只是最低长度，抗猜测能力很弱，建议使用至少 8 位随机配对码。当前 1.2.2 版本的局域网内容仍以明文传输；HMAC 只提供认证与完整性校验，不提供加密，也不能抵御截获后的离线猜码。请只在可信局域网中使用，不要将 TCP 45837 暴露到公网。后续版本可使用 TLS/Noise 加密并保存已配对设备公钥。
+4 位只是最低长度，抗猜测能力很弱，建议使用至少 8 位随机配对码。当前 1.2.3 版本的局域网内容仍以明文传输；HMAC 只提供认证与完整性校验，不提供加密，也不能抵御截获后的离线猜码。请只在可信局域网中使用，不要将 TCP 45837 暴露到公网。后续版本可使用 TLS/Noise 加密并保存已配对设备公钥。
 
 ## 从源码构建
 
@@ -151,7 +153,7 @@ android/                 Android Kotlin + Compose 源码
 windows/                 Windows WPF 源码
 protocol/                TCP/HMAC 线协议
 assets/icons/            共用应用图标
-dist/                    1.2.2 可安装产物
+dist/                    1.2.3 可安装产物
 MACOS_HANDOFF.md         macOS 26+ 开发交接
 CHANGELOG.md             版本说明
 ```
@@ -170,7 +172,9 @@ macOS 端尚未提交实现。计划使用 SwiftUI、AppKit、Network.framework 
 
 ClipBridge is a LAN clipboard synchronization tool for bidirectional text and single-image sync between Windows and Android. The macOS 26+ implementation handoff is available in [MACOS_HANDOFF.md](MACOS_HANDOFF.md).
 
-Current stable version: **1.2.2**
+Current stable version: **1.2.3**
+
+Android 1.2.3 uses a new release signing key and app ID `com.clipbridge.app`. It installs separately from previous versions and test builds. Configure the Windows IP and pairing code again, then uninstall the older app after verifying the new one.
 
 ### Features
 
@@ -180,24 +184,24 @@ Current stable version: **1.2.2**
 - Only bitmap-only clipboard data is encoded as PNG; when that exceeds 20 MB, high-quality JPEG is attempted automatically.
 - One TCP connection carries both directions, with HMAC-SHA256 pairing-code and message-integrity verification.
 - Windows uses native clipboard events, stays in the system tray after minimizing or closing the window, and can auto-start for the current user.
-- Android uses a foreground service and offers a notification action to sync the current clipboard.
+- Android uses a foreground service. Tap its notification directly to sync the current clipboard without expanding it; expanded actions also provide sync and settings.
 - Messages are processed in FIFO order with a maximum of 20 pending items. Remote-origin markers and message UUIDs prevent feedback loops.
 
 ### Downloads
 
 - [GitHub Releases](https://github.com/yeamu/ClipBridge/releases/latest)
-- [Windows 1.2.2 ZIP](dist/ClipBridge-Windows-v1.2.2.zip)
-- [Android 1.2.2 APK](dist/ClipBridge-Android-v1.2.2.apk)
+- [Windows 1.2.3 ZIP](dist/ClipBridge-Windows-v1.2.3.zip)
+- [Android 1.2.3 APK](dist/ClipBridge-Android-v1.2.3.apk)
 
 The Windows package requires the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0). The Android APK is signed with a Release keystore. The private key is not in this repository, and future updates must use the same keystore.
 
-If you previously installed a Debug-signed build, uninstall it before installing the Release APK for the first time. Android does not allow an APK signed by another certificate to replace it, and uninstalling clears the saved Windows IP address and pairing code.
+Previous test builds install separately from this release. Do not run sync in both apps simultaneously. Future stable releases must retain the new signing key and app ID to support in-place upgrades.
 
 ### Quick start
 
 #### Windows
 
-1. Extract `ClipBridge-Windows-v1.2.2.zip` and run `ClipBridge.Windows.exe`.
+1. Extract `ClipBridge-Windows-v1.2.3.zip` and run `ClipBridge.Windows.exe`.
 2. Confirm or edit the LAN IPv4 address to select a local Windows network adapter. Enter the same address on Android. The app listens on and saves this address; stop sync before changing it. Update it if the address changes after switching networks.
 3. Enter a pairing code with at least four characters and click **Start sync**.
 4. On the first start, approve the Windows administrator prompt. ClipBridge then automatically creates a private-network inbound TCP 45837 firewall rule.
@@ -206,10 +210,10 @@ Minimizing or closing the window keeps ClipBridge running in the system tray. Do
 
 #### Android
 
-1. Install `ClipBridge-Android-v1.2.2.apk`.
+1. Install `ClipBridge-Android-v1.2.3.apk`.
 2. Enter the Windows LAN IPv4 address and the same pairing code.
 3. Tap **Start sync** and grant notification permission.
-4. After copying content in another app, open the notification shade and tap **Sync current clipboard**. Returning to ClipBridge after copying can also trigger synchronization.
+4. After copying content in another app, open the notification shade and tap the ClipBridge notification directly to sync, without expanding it. Expanded actions still provide **Sync to computer** and **Open settings**. Returning to ClipBridge after copying can also trigger synchronization.
 
 ### Android clipboard limitations
 
@@ -218,7 +222,7 @@ On Android 10 and later, regular background apps cannot read other apps' clipboa
 - If you copy A, B, and C and synchronize only once, only the latest item, C, can be sent.
 - Synchronize after each copy to send A, B, and C in order.
 - Content received from Windows is written to the Android system clipboard in order. Whether an IME retains it is controlled by that IME.
-- Fully automatic background capture requires implementing and enabling ClipBridge as the default keyboard; version 1.2.2 does not include that mode.
+- Fully automatic background capture requires implementing and enabling ClipBridge as the default keyboard; version 1.2.3 does not include that mode.
 
 ### Network and security
 
@@ -226,7 +230,7 @@ On Android 10 and later, regular background apps cannot read other apps' clipboa
 - TCP port `45837` must be reachable. Android initiates the connection; the desktop side keeps one active Android connection.
 - Every message is authenticated with HMAC-SHA256. See [protocol/PROTOCOL.md](protocol/PROTOCOL.md).
 - Four characters are only the minimum. Use a random pairing code of at least eight characters.
-- Payloads are not encrypted in version 1.2.2. HMAC provides authentication and integrity, not confidentiality. Use ClipBridge only on trusted LANs and never expose its TCP port to the public internet.
+- Payloads are not encrypted in version 1.2.3. HMAC provides authentication and integrity, not confidentiality. Use ClipBridge only on trusted LANs and never expose its TCP port to the public internet.
 
 ### Build from source
 

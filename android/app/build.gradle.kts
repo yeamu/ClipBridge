@@ -24,7 +24,7 @@ val hasReleaseKeystore =
         !releaseKeyPassword.isNullOrBlank()
 
 android { namespace = "com.clipbridge"; compileSdk = 35
-    defaultConfig { applicationId = "com.clipbridge"; minSdk = 29; targetSdk = 35; versionCode = 105; versionName = "1.2.2" }
+    defaultConfig { applicationId = "com.clipbridge.app"; minSdk = 29; targetSdk = 35; versionCode = 106; versionName = "1.2.3" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
@@ -42,6 +42,10 @@ android { namespace = "com.clipbridge"; compileSdk = 35
     }
 
     buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         getByName("release") {
             isDebuggable = false
             isMinifyEnabled = false

@@ -517,7 +517,7 @@ class ClipboardSyncService(
             else -> "png"
         }
         val image = File(folder, "remote-${System.currentTimeMillis()}.$extension").apply { writeBytes(bytes) }
-        val uri = FileProvider.getUriForFile(context, "com.clipbridge.fileprovider", image)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", image)
         clipboard?.setPrimaryClip(ClipData.newUri(context.contentResolver, "ClipBridge image", uri))
     }
 
