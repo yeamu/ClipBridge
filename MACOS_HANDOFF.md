@@ -33,7 +33,7 @@ Apple 的 PackageDescription 6.2 已提供 `.macOS(.v26)`：
 - 当前握手协议版本：v1
 - 当前应用版本：1.2.2
 - 同步类型：纯文本与图片
-- 图片原始二进制上限：20 MB
+- 图片原始二进制上限：100 MB
 
 Windows 端现有能力：
 
@@ -44,7 +44,7 @@ Windows 端现有能力：
 - 双向 FIFO 网络发送
 - 最多 20 条远端待写队列
 - Windows `Win+V` 自动记录写入内容
-- 原始图片文件直接发送；仅位图剪贴板使用 PNG/JPEG 兜底
+- 支持常见图片原始文件直接发送；不直接处理 HEIC/HEIF，由 Android/macOS 发送前转为 PNG；仅位图剪贴板使用 PNG/JPEG 兜底
 - GIF 原始文件传输，保留完整动画
 
 Android 端现有能力：
@@ -55,7 +55,7 @@ Android 端现有能力：
 - Android → 桌面端最多缓存 20 条已捕获内容
 - 桌面端 → Android 按接收顺序写入系统剪贴板
 - Android 10+ 后台剪贴板限制仍然存在
-- Gallery/FileProvider 提供 URI 时直接读取并发送原始图片
+- Gallery/FileProvider 提供 URI 时读取原始图片；HEIC/HEIF 转为 PNG，其他格式直接发送
 - 支持 PNG、JPG/JPEG/JFIF、BMP、GIF、TIFF、WebP、HEIC/HEIF、AVIF、ICO
 
 重要限制：三星输入法显示的剪贴板历史是输入法私有数据。ClipBridge 普通应用只能读取 Android 当前 `primaryClip`，无法批量读取输入法历史。
@@ -85,7 +85,7 @@ macOS 端应替代 Windows 桌面端，与现有 Android APK 直接兼容：
 - 每条消息是单行 UTF-8 JSON
 - 每条 JSON 后追加 `\n`
 - 接收缓冲区需要处理粘包、拆包与多行
-- macOS 端单行上限至少设置为 32 MiB；20 MB 图片经 Base64 后约 26.7 MiB，再加 JSON 字段
+- macOS 端单行上限至少设置为 160 MiB；100 MB 图片经 Base64 后约 133.4 MiB，再加 JSON 字段
 - JSON 字段名区分大小写，必须保持下面的 PascalCase
 
 ### 4.1 Hello
@@ -170,14 +170,16 @@ Base64(HMAC-SHA256(
 
 允许的 `<extension>`：`png`、`jpg`、`jpeg`、`jfif`、`bmp`、`gif`、`tif`、`tiff`、`webp`、`heic`、`heif`、`avif`、`ico`。
 
+Windows 不接受 `heic` / `heif` 原始载荷，发送给 Windows 前必须转换为 `clipbridge:png:`。
+
 图片处理规则：
 
-- Base64 解码后的原始二进制不得超过 20 MB。
+- Base64 解码后的原始二进制不得超过 100 MB。
 - 扩展名必须先转小写并通过固定白名单，禁止直接拼接未经验证的路径。
 - 收到原始图片后保存到应用缓存目录，再通过 `NSPasteboard` 写入文件 URL 和适用的 UTI。
 - GIF 不得通过 `NSImage` 重编码，否则可能只剩第一帧。
-- 本地剪贴板能取得文件 URL 时直接读取原始文件发送，不解码、不转码。
-- 只有剪贴板仅提供位图时才编码为 PNG；若 PNG 超过 20 MB，再使用 JPEG 压缩到限制内。
+- 本地剪贴板能取得文件 URL 时，HEIC/HEIF 转换为 PNG 后发送，其他格式直接读取原始文件发送。原文件及转换后的 PNG 均不得超过 100 MB。
+- 只有剪贴板仅提供位图时才编码为 PNG；若 PNG 超过 100 MB，再使用 JPEG 压缩到限制内。
 - Base64 前缀字符串本身参与 HMAC，不能在验证前修改大小写、扩展名或内容。
 
 ### 4.3 心跳
@@ -310,7 +312,7 @@ Apple 文档：
 - 计数未变化时不读取剪贴板
 - 停止同步时取消 Timer
 - 计数变化后按“文件 URL 图片 → 原始图片 Data → 普通字符串”的顺序读取
-- 空文本不发送；图片执行 20 MB 上限检查
+- 空文本不发送；图片执行 100 MB 上限检查
 - 相同文本是否再次发送应根据 changeCount/来源标记决定，不能只按文本永久去重
 
 虽然形式上有 Timer，但它不是反复读取剪贴板，只检查 AppKit 提供的 changeCount。macOS 没有与 Windows `WM_CLIPBOARDUPDATE` 等价的公开全局事件。
@@ -480,10 +482,10 @@ xcodebuild \
 - Android 复制文本 → 点通知栏“一键同步” → Mac 更新。
 - Mac 连续复制 A、B、C → Android 按顺序收到。
 - Android 每次捕获并同步 A、B、C → Mac 按顺序写入。
-- Android 复制 1–20 MB 的 HEIC → Mac 收到同大小原始文件，不转 PNG。
+- Android 复制 HEIC/HEIF → Mac 收到 PNG；原文件及转换后 PNG 均须不超过 100 MB。
 - Android 复制 GIF → Mac 保存并粘贴后仍包含完整动画。
-- Mac 从 Finder 复制 PNG、JPEG、WebP、HEIC、AVIF → Android 收到原始格式。
-- 超过 20 MB 的图片在发送端明确提示并且不入队。
+- Mac 从 Finder 复制 PNG、JPEG、WebP、AVIF → Android 收到原始格式；HEIC/HEIF 收到 PNG。
+- 超过 100 MB 的图片在发送端明确提示并且不入队。
 - 只提供位图的截图/画布 → PNG 或 JPEG 兜底后可双向粘贴。
 - 配对码错误时连接立即关闭，不传剪贴板。
 - Android 断网后重新连接。
@@ -511,10 +513,10 @@ xcodebuild \
 - Android 与 Mac 保持连接 30 分钟无周期性断开。
 - 单条文本在正常局域网下端到端延迟小于 300 ms。
 - 连续 20 条消息保持顺序且无重复。
-- 1–20 MB 原始 HEIC 往返后文件格式和字节保持不变。
+- HEIC/HEIF 往返同步后为可解码的 PNG，转换后超过 100 MB 时拒绝同步。
 - 动画 GIF 往返后帧数、时长和原始字节保持不变。
-- PNG、JPG/JPEG/JFIF、BMP、GIF、TIFF、WebP、HEIC/HEIF、AVIF、ICO 均完成至少一次单向原始文件测试。
-- 20 MB 图片可以成功同步，20 MB + 1 byte 被拒绝。
+- PNG、JPG/JPEG/JFIF、BMP、GIF、TIFF、WebP、HEIC/HEIF、AVIF、ICO 均完成至少一次单向同步测试，其中 HEIC/HEIF 验证转换为 PNG。
+- 100 MB 图片可以成功同步，100 MB + 1 byte 被拒绝。
 - 错误配对码无法收到任何剪贴板明文。
 - 关闭主窗口不停止同步，明确退出才停止。
 
@@ -529,10 +531,10 @@ xcodebuild \
 与当前 Android v1.2.2 APK 兼容。实现菜单栏常驻、主设置窗口、
 至少 4 位配对码、单客户端握手认证、单 writer、FIFO 20 条、
 NSPasteboard.changeCount 监听、远端来源标记与防回写循环。
-实现文字与单张图片双向同步：原始图片上限 20 MB，支持
+实现文字与单张图片双向同步：原始图片上限 100 MB，支持
 PNG/JPEG/JFIF/BMP/GIF/TIFF/WebP/HEIC/HEIF/AVIF/ICO；能读取原始文件时
-必须直接传输，GIF 保留完整动画，只有位图剪贴板才做 PNG/JPEG 兜底。
-单行网络缓冲上限至少 32 MiB，并严格校验图片扩展名白名单。
+HEIC/HEIF 必须转为 PNG，其他格式直接传输，GIF 保留完整动画；位图剪贴板使用 PNG/JPEG 兜底。
+单行网络缓冲上限至少 160 MiB，并严格校验图片扩展名白名单。
 使用 Network.framework、CryptoKit、SwiftUI、AppKit，不引入第三方依赖。
 完成后在 Mac 上用 Xcode 26 Release 构建并实际联调 Android。
 ```

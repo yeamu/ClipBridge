@@ -72,7 +72,7 @@ class ClipboardSyncService(
         private const val JPEG_PREFIX = "clipbridge:jpeg:"
         private const val GIF_PREFIX = "clipbridge:gif:"
         private const val RAW_IMAGE_PREFIX = "clipbridge:image:"
-        private const val MAX_IMAGE_BYTES = 20 * 1024 * 1024
+        private const val MAX_IMAGE_BYTES = 100 * 1024 * 1024
     }
 
     private data class PendingClip(
@@ -355,7 +355,7 @@ class ClipboardSyncService(
                 }
                 output.toByteArray()
             } ?: run {
-                if (sourceTooLarge) report("原始图片超过 20 MB，未同步。")
+                if (sourceTooLarge) report("原始图片超过 100 MB，未同步。")
                 return null
             }
             val isGif = source.size >= 6 &&
@@ -365,7 +365,8 @@ class ClipboardSyncService(
                 return GIF_PREFIX + android.util.Base64.encodeToString(source, android.util.Base64.NO_WRAP)
             }
             val sourceExtension = detectImageExtension(uri, source)
-            if (sourceExtension != null) {
+            val requiresPng = sourceExtension == "heic" || sourceExtension == "heif"
+            if (sourceExtension != null && !requiresPng) {
                 val prefix = when (sourceExtension) {
                     "png" -> IMAGE_PREFIX
                     "jpg", "jpeg", "jfif" -> JPEG_PREFIX
@@ -385,12 +386,12 @@ class ClipboardSyncService(
                 BitmapFactory.decodeByteArray(source, 0, source.size)
             } ?: run { report("无法读取该图片格式，未同步。"); return null }
             val encoded = try {
-                encodeStaticImage(bitmap)
+                encodeStaticImage(bitmap, pngOnly = requiresPng)
             } finally {
                 bitmap.recycle()
             }
             if (encoded == null) {
-                report("图片转换后仍超过 20 MB，未同步。")
+                report("图片转换后仍超过 100 MB，未同步。")
                 return null
             }
             return encoded.first + android.util.Base64.encodeToString(encoded.second, android.util.Base64.NO_WRAP)
@@ -398,11 +399,12 @@ class ClipboardSyncService(
         return item.coerceToText(context)?.toString()?.takeIf { it.isNotBlank() }
     }
 
-    private fun encodeStaticImage(bitmap: Bitmap): Pair<String, ByteArray>? {
+    private fun encodeStaticImage(bitmap: Bitmap, pngOnly: Boolean = false): Pair<String, ByteArray>? {
         val output = ByteArrayOutputStream()
         if (bitmap.compress(Bitmap.CompressFormat.PNG, 100, output) && output.size() <= MAX_IMAGE_BYTES) {
             return IMAGE_PREFIX to output.toByteArray()
         }
+        if (pngOnly) return null
         for (quality in intArrayOf(92, 85, 75, 65, 55, 45)) {
             output.reset()
             if (bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output) && output.size() <= MAX_IMAGE_BYTES) {
@@ -507,10 +509,23 @@ class ClipboardSyncService(
             rawExtension != null -> payload.substring(0, rawSeparator + 1)
             else -> IMAGE_PREFIX
         }
-        val bytes = android.util.Base64.decode(payload.removePrefix(prefix), android.util.Base64.NO_WRAP)
+        var bytes = android.util.Base64.decode(payload.removePrefix(prefix), android.util.Base64.NO_WRAP)
         if (bytes.size > MAX_IMAGE_BYTES) return
+        val requiresPng = rawExtension == "heic" || rawExtension == "heif"
+        if (requiresPng) {
+            val bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(java.nio.ByteBuffer.wrap(bytes))) { decoder, _, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+            val encoded = try {
+                encodeStaticImage(bitmap, pngOnly = true)
+            } finally {
+                bitmap.recycle()
+            } ?: run { report("HEIC/HEIF 转换为 PNG 后超过 100 MB，未同步。"); return }
+            bytes = encoded.second
+        }
         val folder = File(context.cacheDir, "clipboard").apply { mkdirs() }
         val extension = when {
+            requiresPng -> "png"
             isGif -> "gif"
             isJpeg -> "jpg"
             rawExtension != null -> rawExtension

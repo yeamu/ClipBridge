@@ -15,10 +15,11 @@ ClipBridge 是一个局域网剪贴板同步工具。目前支持 Windows 与 An
 ## 功能
 
 - Windows 与 Android 双向同步纯文本剪贴板
-- Windows 与 Android 双向同步图片剪贴板，单张原文件最大 20 MB
-- 常见输入格式：PNG、JPG/JPEG/JFIF、BMP、GIF、TIFF、WebP、HEIC/HEIF、AVIF、ICO
-- 能取得原文件/URI 时直接传输原始图片，不解码、不转码；GIF 保留完整动画
-- 只有剪贴板仅提供位图时才转成 PNG，超过 20 MB 时自动使用高质量 JPEG
+- Windows 与 Android 双向同步图片剪贴板，单张原文件最大 100 MB
+- 两端支持的常见图片格式：PNG、JPG/JPEG/JFIF、BMP、GIF、TIFF、WebP、AVIF、ICO
+- Android 额外支持 HEIC/HEIF，转换为 PNG 后同步（转换后仍须不超过 100 MB）；Windows 不直接处理 HEIC/HEIF 文件
+- 其他格式能取得原文件/URI 时直接传输原始图片，不解码、不转码；GIF 保留完整动画
+- 只有剪贴板仅提供位图时才转成 PNG，超过 100 MB 时自动使用高质量 JPEG
 - 使用同一条 TCP 连接完成双向通信
 - HMAC-SHA256 配对认证，配对码至少 4 位
 - Windows 使用 `WM_CLIPBOARDUPDATE` 监听，不定时轮询剪贴板
@@ -179,9 +180,10 @@ Android 1.2.3 uses a new release signing key and app ID `com.clipbridge.app`. It
 ### Features
 
 - Bidirectional plain-text and single-image clipboard sync between Windows and Android.
-- Original image size limit: 20 MB. Supported formats: PNG, JPG/JPEG/JFIF, BMP, GIF, TIFF, WebP, HEIC/HEIF, AVIF, and ICO.
-- When an original file or URI is available, its bytes are transferred directly without decoding or transcoding. Animated GIFs retain all frames.
-- Only bitmap-only clipboard data is encoded as PNG; when that exceeds 20 MB, high-quality JPEG is attempted automatically.
+- Original image size limit: 100 MB. Both platforms support PNG, JPG/JPEG/JFIF, BMP, GIF, TIFF, WebP, AVIF, and ICO.
+- Android additionally supports HEIC/HEIF and converts it to PNG before syncing; the PNG must also fit within 100 MB. Windows does not handle HEIC/HEIF files directly.
+- For other formats, when an original file or URI is available, its bytes are transferred directly without decoding or transcoding. Animated GIFs retain all frames.
+- Only bitmap-only clipboard data is encoded as PNG; when that exceeds 100 MB, high-quality JPEG is attempted automatically.
 - One TCP connection carries both directions, with HMAC-SHA256 pairing-code and message-integrity verification.
 - Windows uses native clipboard events, stays in the system tray after minimizing or closing the window, and can auto-start for the current user.
 - Android uses a foreground service. Tap its notification directly to sync the current clipboard without expanding it; expanded actions also provide sync and settings.

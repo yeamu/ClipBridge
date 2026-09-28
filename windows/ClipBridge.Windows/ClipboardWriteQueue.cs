@@ -14,7 +14,7 @@ internal sealed class ClipboardActor : IDisposable
     private const string JpegPrefix = "clipbridge:jpeg:";
     private const string GifPrefix = "clipbridge:gif:";
     private const string RawImagePrefix = "clipbridge:image:";
-    private const int MaxImageBytes = 20 * 1024 * 1024;
+    private const int MaxImageBytes = 100 * 1024 * 1024;
     private const uint CfUnicodeText = 13;
     private const uint GmemMoveable = 0x0002;
     private readonly object _gate = new();
@@ -138,7 +138,7 @@ internal sealed class ClipboardActor : IDisposable
         try
         {
             var bytes = Convert.FromBase64String(payload[GifPrefix.Length..]);
-            if (bytes.Length > MaxImageBytes) { error = "GIF 超过 20 MB"; return false; }
+            if (bytes.Length > MaxImageBytes) { error = "GIF 超过 100 MB"; return false; }
             return TrySetClipboardFile(bytes, "gif", marker, out error);
         }
         catch (Exception exception) { error = exception.Message; return false; }
@@ -163,7 +163,7 @@ internal sealed class ClipboardActor : IDisposable
             var bytes = Convert.FromBase64String(payload[(separator + 1)..]);
             if (bytes.Length > MaxImageBytes)
             {
-                error = "图片超过 20 MB";
+                error = "图片超过 100 MB";
                 return false;
             }
             return TrySetClipboardFile(bytes, extension, marker, out error);
@@ -200,7 +200,7 @@ internal sealed class ClipboardActor : IDisposable
         {
             var prefix = payload.StartsWith(JpegPrefix, StringComparison.Ordinal) ? JpegPrefix : ImagePrefix;
             var bytes = Convert.FromBase64String(payload[prefix.Length..]);
-            if (bytes.Length > MaxImageBytes) { error = "图片超过 20 MB"; return false; }
+            if (bytes.Length > MaxImageBytes) { error = "图片超过 100 MB"; return false; }
             using var stream = new MemoryStream(bytes);
             var image = new BitmapImage();
             image.BeginInit(); image.CacheOption = BitmapCacheOption.OnLoad; image.StreamSource = stream; image.EndInit(); image.Freeze();
@@ -383,7 +383,7 @@ internal sealed class ClipboardActor : IDisposable
 
     private static bool IsSupportedImageExtension(string extension) =>
         extension is "png" or "jpg" or "jpeg" or "jfif" or "bmp" or "gif" or
-            "tif" or "tiff" or "webp" or "heic" or "heif" or "avif" or "ico";
+            "tif" or "tiff" or "webp" or "avif" or "ico";
 
     public void Dispose()
     {
