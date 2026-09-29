@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace ClipBridge.Windows;
 
@@ -23,16 +24,17 @@ internal sealed class ClipboardActor : IDisposable
     private readonly Action<string> _textRead;
     private readonly Action<ClipboardWriteResult> _writeCompleted;
     private readonly string _originId = Guid.NewGuid().ToString("N");
-    private readonly Queue<PendingWrite> _pendingWrites = [];
+    private readonly BoundedMemoryQueue<PendingWrite> _pendingWrites = new(item => item.Text.Length * 2L + 1024);
+    private readonly ClipboardFileCache _fileCache;
+    private DateTime _retryAfter;
     private bool _readRequested;
-    private long _nextSequence;
-    private string? _lastSelfMarker;
-    private string? _lastSelfText;
     private uint _lastSelfClipboardSequence;
     private bool _stopping;
 
-    public ClipboardActor(Action<string> textRead, Action<ClipboardWriteResult> writeCompleted)
+    public ClipboardActor(Action<string> textRead, Action<ClipboardWriteResult> writeCompleted, string? storageDirectory = null)
     {
+        var storage = storageDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipBridge");
+        _fileCache = new ClipboardFileCache(Path.Combine(storage, "clipboard"));
         _textRead = textRead;
         _writeCompleted = writeCompleted;
         _thread = new Thread(Run)
@@ -44,15 +46,19 @@ internal sealed class ClipboardActor : IDisposable
         _thread.Start();
     }
 
-    public void Enqueue(string text)
+    public bool Enqueue(string text, Action<ClipboardWriteResult>? completion = null)
     {
         lock (_gate)
         {
-            if (_stopping) return;
-            if (_pendingWrites.Count == MaxPendingWrites) _pendingWrites.Dequeue();
-            _pendingWrites.Enqueue(new PendingWrite(++_nextSequence, text));
+            if (_stopping) return false;
+            if (!_pendingWrites.TryAdd(new PendingWrite(Guid.NewGuid().ToString("N"), text, completion)))
+            {
+                _writeCompleted(new ClipboardWriteResult(0, false, 0, "接收队列已满，对端会保留内容并重试", 0));
+                return false;
+            }
+            _signal.Set();
+            return true;
         }
-        _signal.Set();
     }
 
     public void RequestRead()
@@ -61,128 +67,141 @@ internal sealed class ClipboardActor : IDisposable
         {
             if (_stopping) return;
             _readRequested = true;
+            _signal.Set();
         }
-        _signal.Set();
     }
 
     private void Run()
     {
-        while (true)
+        var dispatcher = Dispatcher.CurrentDispatcher;
+        try
         {
-            _signal.WaitOne();
-            lock (_gate) { if (_stopping) return; }
-
-            while (TryTakeWork(out var pending, out var shouldRead))
+            CleanupCache();
+            while (true)
             {
-                if (pending is not null)
+                ClipboardMessagePump.Drain();
+                bool read;
+                lock (_gate)
                 {
-                    _writeCompleted(TryWrite(pending));
+                    if (_stopping) return;
+                    read = _readRequested;
+                    _readRequested = false;
                 }
-                else if (shouldRead) TryRead();
+                if (read) TryRead();
+                var entry = _pendingWrites.Peek();
+                if (entry is not null && DateTime.UtcNow >= _retryAfter)
+                {
+                    try
+                    {
+                        var result = TryWrite(entry.Text, entry.Id);
+                        if (result.Success)
+                        {
+                            _pendingWrites.Complete(entry);
+                            TransferMemory.Released(entry.Text.Length * 2L);
+                            _retryAfter = DateTime.MinValue;
+                        }
+                        else
+                        {
+                            _retryAfter = DateTime.UtcNow.AddSeconds(30);
+                        }
+                        _writeCompleted(result);
+                        entry.Completion?.Invoke(result);
+                    }
+                    catch (Exception exception)
+                    {
+                        _retryAfter = DateTime.UtcNow.AddSeconds(30);
+                        var result = new ClipboardWriteResult(0, false, 0, exception.Message, 0);
+                        _writeCompleted(result);
+                        entry.Completion?.Invoke(result);
+                    }
+                    entry = null;
+                    continue;
+                }
+                var wait = entry is null ? Timeout.Infinite : Math.Clamp((int)(_retryAfter - DateTime.UtcNow).TotalMilliseconds, 10, 30000);
+                entry = null;
+                ClipboardMessagePump.Wait(_signal, wait);
             }
         }
-    }
-
-    private bool TryTakeWork(out PendingWrite? pending, out bool shouldRead)
-    {
-        lock (_gate)
+        finally
         {
-            if (_pendingWrites.Count > 0)
-            {
-                pending = _pendingWrites.Dequeue();
-                shouldRead = false;
-                return true;
-            }
-            if (_readRequested)
-            {
-                _readRequested = false;
-                pending = null;
-                shouldRead = true;
-                return true;
-            }
-            pending = null;
-            shouldRead = false;
-            return false;
+            var released = _pendingWrites.Bytes;
+            lock (_gate) { _pendingWrites.Clear(); _signal.Dispose(); }
+            ClipboardMessagePump.Drain();
+            dispatcher.InvokeShutdown();
+            TransferMemory.Released(released);
         }
     }
 
-    private ClipboardWriteResult TryWrite(PendingWrite pending)
+    private ClipboardWriteResult TryWrite(string text, string key)
     {
+        using var activity = TransferMemory.BeginActivity();
         var stopwatch = Stopwatch.StartNew();
+        var marker = $"{_originId}:{key}";
+        string? path = null;
+        BitmapSource? image = null;
         string? lastError = null;
+        // Decode and create file-backed content ONCE, before clipboard retries.
+        try
+        {
+            if (text.StartsWith(GifPrefix, StringComparison.Ordinal))
+                path = PrepareFile(text, GifPrefix, "gif", key);
+            else if (text.StartsWith(RawImagePrefix, StringComparison.Ordinal))
+            {
+                var separator = text.IndexOf(':', RawImagePrefix.Length);
+                if (separator <= RawImagePrefix.Length) throw new InvalidDataException("图片载荷缺少格式");
+                var extension = text[RawImagePrefix.Length..separator].ToLowerInvariant();
+                if (!IsSupportedImageExtension(extension)) throw new InvalidDataException("不支持的图片格式");
+                path = PrepareFile(text, text[..(separator + 1)], extension, key);
+            }
+            else if (text.StartsWith(ImagePrefix, StringComparison.Ordinal) || text.StartsWith(JpegPrefix, StringComparison.Ordinal))
+                image = PrepareImage(text);
+        }
+        catch (Exception exception) { return new ClipboardWriteResult(text.Length, false, 0, exception.Message, stopwatch.ElapsedMilliseconds); }
+        if (image is not null) TransferMemory.Released((long)image.PixelWidth * image.PixelHeight * 4);
         for (var attempt = 1; attempt <= 200; attempt++)
         {
-            var marker = $"{_originId}:{pending.Sequence}";
-            var written = pending.Text.StartsWith(RawImagePrefix, StringComparison.Ordinal)
-                ? TrySetClipboardRawImage(pending.Text, marker, out lastError)
-                : pending.Text.StartsWith(GifPrefix, StringComparison.Ordinal)
-                ? TrySetClipboardGif(pending.Text, marker, out lastError)
-                : pending.Text.StartsWith(ImagePrefix, StringComparison.Ordinal) ||
-                  pending.Text.StartsWith(JpegPrefix, StringComparison.Ordinal)
-                    ? TrySetClipboardImage(pending.Text, out lastError)
-                    : TrySetClipboardText(pending.Text, marker, out lastError);
+            lock (_gate) if (_stopping) return new ClipboardWriteResult(text.Length, false, attempt, "已停止", stopwatch.ElapsedMilliseconds);
+            var written = path is not null ? TrySetClipboardFile(path, marker, out lastError)
+                : image is not null
+                    ? TrySetClipboardImage(image, out lastError)
+                    : TrySetClipboardText(text, marker, out lastError);
             if (written)
             {
-                _lastSelfMarker = marker;
-                _lastSelfText = pending.Text;
                 _lastSelfClipboardSequence = GetClipboardSequenceNumber();
-                return new ClipboardWriteResult(pending.Text, true, attempt, null, stopwatch.ElapsedMilliseconds);
+                CleanupCache();
+                return new ClipboardWriteResult(text.Length, true, attempt, null, stopwatch.ElapsedMilliseconds);
             }
             Thread.Sleep(attempt <= 50 ? 2 : 5);
         }
-        return new ClipboardWriteResult(pending.Text, false, 200, lastError, stopwatch.ElapsedMilliseconds);
+        return new ClipboardWriteResult(text.Length, false, 200, lastError + "；内容保留在内存中，每 30 秒重试", stopwatch.ElapsedMilliseconds);
     }
 
-    private static bool TrySetClipboardGif(string payload, string marker, out string? error)
+    private string PrepareFile(string payload, string prefix, string extension, string key)
+    {
+        if (payload.Length - prefix.Length > ((MaxImageBytes + 2L) / 3) * 4)
+            throw new InvalidDataException("图片超过 100 MB");
+        var bytes = PayloadCodec.Decode(payload.AsSpan(prefix.Length), MaxImageBytes);
+        if (bytes.Length > MaxImageBytes) throw new InvalidDataException("图片超过 100 MB");
+        var path = _fileCache.Store(bytes, extension, key);
+        CleanupCache(path);
+        return path;
+    }
+
+    private void CleanupCache(string? preparedPath = null)
     {
         try
         {
-            var bytes = Convert.FromBase64String(payload[GifPrefix.Length..]);
-            if (bytes.Length > MaxImageBytes) { error = "GIF 超过 100 MB"; return false; }
-            return TrySetClipboardFile(bytes, "gif", marker, out error);
+            var paths = CurrentFileReferences();
+            if (preparedPath is not null) paths.Add(preparedPath);
+            _fileCache.Cleanup(paths);
         }
-        catch (Exception exception) { error = exception.Message; return false; }
+        catch { } // Never prune when the current clipboard references cannot be read.
     }
 
-    private static bool TrySetClipboardRawImage(string payload, string marker, out string? error)
+    private static bool TrySetClipboardFile(string path, string marker, out string? error)
     {
         try
         {
-            var separator = payload.IndexOf(':', RawImagePrefix.Length);
-            if (separator <= RawImagePrefix.Length)
-            {
-                error = "图片载荷缺少格式";
-                return false;
-            }
-            var extension = payload[RawImagePrefix.Length..separator].ToLowerInvariant();
-            if (!IsSupportedImageExtension(extension))
-            {
-                error = "不支持的图片格式";
-                return false;
-            }
-            var bytes = Convert.FromBase64String(payload[(separator + 1)..]);
-            if (bytes.Length > MaxImageBytes)
-            {
-                error = "图片超过 100 MB";
-                return false;
-            }
-            return TrySetClipboardFile(bytes, extension, marker, out error);
-        }
-        catch (Exception exception) { error = exception.Message; return false; }
-    }
-
-    private static bool TrySetClipboardFile(byte[] bytes, string extension, string marker, out string? error)
-    {
-        try
-        {
-            var folder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ClipBridge",
-                "clipboard"
-            );
-            Directory.CreateDirectory(folder);
-            var path = Path.Combine(folder, $"remote-{Guid.NewGuid():N}.{extension}");
-            File.WriteAllBytes(path, bytes);
             var files = new System.Collections.Specialized.StringCollection { path };
             var data = new System.Windows.DataObject();
             data.SetFileDropList(files);
@@ -194,20 +213,22 @@ internal sealed class ClipboardActor : IDisposable
         catch (Exception exception) { error = exception.Message; return false; }
     }
 
-    private static bool TrySetClipboardImage(string payload, out string? error)
+    private static BitmapSource PrepareImage(string payload)
     {
-        try
-        {
-            var prefix = payload.StartsWith(JpegPrefix, StringComparison.Ordinal) ? JpegPrefix : ImagePrefix;
-            var bytes = Convert.FromBase64String(payload[prefix.Length..]);
-            if (bytes.Length > MaxImageBytes) { error = "图片超过 100 MB"; return false; }
-            using var stream = new MemoryStream(bytes);
-            var image = new BitmapImage();
-            image.BeginInit(); image.CacheOption = BitmapCacheOption.OnLoad; image.StreamSource = stream; image.EndInit(); image.Freeze();
-            System.Windows.Clipboard.SetImage(image);
-            error = null;
-            return true;
-        }
+        var prefix = payload.StartsWith(JpegPrefix, StringComparison.Ordinal) ? JpegPrefix : ImagePrefix;
+        if (payload.Length - prefix.Length > ((MaxImageBytes + 2L) / 3) * 4) throw new InvalidDataException("图片超过 100 MB");
+        var bytes = PayloadCodec.Decode(payload.AsSpan(prefix.Length), MaxImageBytes);
+        if (bytes.Length > MaxImageBytes) throw new InvalidDataException("图片超过 100 MB");
+        using var stream = new MemoryStream(bytes);
+        var image = new BitmapImage();
+        image.BeginInit(); image.CacheOption = BitmapCacheOption.OnLoad; image.StreamSource = stream;
+        image.EndInit(); image.Freeze();
+        return image;
+    }
+
+    private static bool TrySetClipboardImage(BitmapSource image, out string? error)
+    {
+        try { System.Windows.Clipboard.SetImage(image); error = null; return true; }
         catch (Exception exception) { error = exception.Message; return false; }
     }
 
@@ -280,15 +301,14 @@ internal sealed class ClipboardActor : IDisposable
 
     private void TryRead()
     {
+        using var activity = TransferMemory.BeginActivity();
         for (var attempt = 0; attempt < 10; attempt++)
         {
             try
             {
                 var sequenceBefore = GetClipboardSequenceNumber();
+                if (sequenceBefore != 0 && sequenceBefore == _lastSelfClipboardSequence) return;
                 var dataObject = System.Windows.Clipboard.GetDataObject();
-                var marker = dataObject?.GetDataPresent(OriginMarkerFormat, false) == true
-                    ? dataObject.GetData(OriginMarkerFormat, false) as string
-                    : null;
                 var text = dataObject?.GetDataPresent(System.Windows.DataFormats.UnicodeText, true) == true
                     ? dataObject.GetData(System.Windows.DataFormats.UnicodeText, true) as string
                     : null;
@@ -308,42 +328,44 @@ internal sealed class ClipboardActor : IDisposable
                 if (sequenceAfter != 0 && sequenceAfter == _lastSelfClipboardSequence)
                     return;
 
-                _lastSelfMarker = null;
-                _lastSelfText = null;
                 _lastSelfClipboardSequence = 0;
-                if (System.Windows.Clipboard.ContainsImage() &&
-                    System.Windows.Clipboard.GetImage() is BitmapSource image)
-                {
-                    SendImage(image);
-                }
-                else if (dataObject?.GetDataPresent("PNG", true) == true)
+                // Use the source PNG when available: avoid decoding a full bitmap
+                // and encoding it again for a screenshot already stored as PNG.
+                if (dataObject?.GetDataPresent("PNG", false) == true)
                 {
                     var pngData = dataObject.GetData("PNG", true);
                     var bytes = pngData switch
                     {
-                        MemoryStream stream => stream.ToArray(),
-                        byte[] array => array,
-                        _ => null
+                        MemoryStream stream when stream.TryGetBuffer(out var buffer) => buffer.AsMemory(0, (int)stream.Length),
+                        MemoryStream stream => stream.ToArray().AsMemory(),
+                        byte[] array => array.AsMemory(),
+                        _ => ReadOnlyMemory<byte>.Empty
                     };
-                    if (bytes is { Length: <= MaxImageBytes })
-                        _textRead(ImagePrefix + Convert.ToBase64String(bytes));
+                    if (bytes.Length > 0 && bytes.Length <= MaxImageBytes) PublishImage(ImagePrefix, bytes);
+                    else if (System.Windows.Clipboard.GetImage() is BitmapSource fallback) SendImage(fallback);
+                }
+                else if (System.Windows.Clipboard.ContainsImage() &&
+                    System.Windows.Clipboard.GetImage() is BitmapSource image)
+                {
+                    SendImage(image);
                 }
                 else if (dataObject?.GetDataPresent(System.Windows.DataFormats.FileDrop, true) == true &&
                          dataObject.GetData(System.Windows.DataFormats.FileDrop, true) is string[] files &&
                          files.Length == 1 && File.Exists(files[0]) && IsSupportedImageFile(files[0]))
                 {
                     var extension = Path.GetExtension(files[0]).TrimStart('.').ToLowerInvariant();
+                    if (new FileInfo(files[0]).Length > MaxImageBytes) return;
                     var bytes = File.ReadAllBytes(files[0]);
                     if (bytes.Length <= MaxImageBytes)
                     {
                         if (extension == "gif")
-                            _textRead(GifPrefix + Convert.ToBase64String(bytes));
+                            PublishImage(GifPrefix, bytes);
                         else if (extension == "png")
-                            _textRead(ImagePrefix + Convert.ToBase64String(bytes));
+                            PublishImage(ImagePrefix, bytes);
                         else if (extension is "jpg" or "jpeg" or "jfif")
-                            _textRead(JpegPrefix + Convert.ToBase64String(bytes));
+                            PublishImage(JpegPrefix, bytes);
                         else
-                            _textRead($"{RawImagePrefix}{extension}:{Convert.ToBase64String(bytes)}");
+                            PublishImage($"{RawImagePrefix}{extension}:", bytes);
                     }
                 }
                 else if (text is not null) _textRead(text);
@@ -355,13 +377,14 @@ internal sealed class ClipboardActor : IDisposable
 
     private void SendImage(BitmapSource image)
     {
+        TransferMemory.Released((long)image.PixelWidth * image.PixelHeight * 4);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(image));
         using var png = new MemoryStream();
         encoder.Save(png);
         if (png.Length <= MaxImageBytes)
         {
-            _textRead(ImagePrefix + Convert.ToBase64String(png.ToArray()));
+            PublishImage(ImagePrefix, png.GetBuffer().AsMemory(0, (int)png.Length));
             return;
         }
         foreach (var quality in new[] { 92, 85, 75, 65, 55, 45 })
@@ -372,10 +395,38 @@ internal sealed class ClipboardActor : IDisposable
             jpegEncoder.Save(jpeg);
             if (jpeg.Length <= MaxImageBytes)
             {
-                _textRead(JpegPrefix + Convert.ToBase64String(jpeg.ToArray()));
+                PublishImage(JpegPrefix, jpeg.GetBuffer().AsMemory(0, (int)jpeg.Length));
                 return;
             }
         }
+    }
+
+    private static List<string> CurrentFileReferences()
+    {
+        const uint fileDrop = 15;
+        if (!IsClipboardFormatAvailable(fileDrop)) return [];
+        if (!OpenClipboard(IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            var handle = GetClipboardData(fileDrop);
+            if (handle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            var count = DragQueryFile(handle, uint.MaxValue, null, 0);
+            var paths = new List<string>();
+            for (uint index = 0; index < count; index++)
+            {
+                var length = DragQueryFile(handle, index, null, 0);
+                var path = new System.Text.StringBuilder(checked((int)length + 1));
+                DragQueryFile(handle, index, path, (uint)path.Capacity);
+                paths.Add(path.ToString());
+            }
+            return paths;
+        }
+        finally { CloseClipboard(); }
+    }
+    private void PublishImage(string prefix, ReadOnlyMemory<byte> bytes)
+    {
+        _textRead(PayloadCodec.Encode(prefix, bytes));
+        TransferMemory.Released(bytes.Length * 3L);
     }
 
     private static bool IsSupportedImageFile(string path) =>
@@ -385,16 +436,23 @@ internal sealed class ClipboardActor : IDisposable
         extension is "png" or "jpg" or "jpeg" or "jfif" or "bmp" or "gif" or
             "tif" or "tiff" or "webp" or "avif" or "ico";
 
+    private sealed record PendingWrite(string Id, string Text, Action<ClipboardWriteResult>? Completion);
+
     public void Dispose()
     {
-        lock (_gate) { _stopping = true; _pendingWrites.Clear(); _readRequested = false; }
-        _signal.Set();
-        if (Thread.CurrentThread != _thread && _thread.Join(3000)) _signal.Dispose();
+        long released;
+        lock (_gate)
+        {
+            if (_stopping) return;
+            _stopping = true;
+            _readRequested = false;
+            released = _pendingWrites.Bytes;
+            _pendingWrites.Clear();
+            _signal.Set();
+        }
+        TransferMemory.Released(released);
+        if (Thread.CurrentThread != _thread) _thread.Join(3000);
     }
-
-    private sealed record PendingWrite(long Sequence, string Text);
-
-    private const int MaxPendingWrites = 20;
 
     [DllImport("user32.dll")]
     private static extern uint GetClipboardSequenceNumber();
@@ -410,6 +468,15 @@ internal sealed class ClipboardActor : IDisposable
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetClipboardData(uint format);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsClipboardFormatAvailable(uint format);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint DragQueryFile(IntPtr drop, uint index, System.Text.StringBuilder? name, uint length);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern uint RegisterClipboardFormat(string lpszFormat);
@@ -427,4 +494,4 @@ internal sealed class ClipboardActor : IDisposable
     private static extern IntPtr GlobalFree(IntPtr hMem);
 }
 
-internal sealed record ClipboardWriteResult(string Text, bool Success, int Attempts, string? Error, long ElapsedMilliseconds);
+internal sealed record ClipboardWriteResult(int TextLength, bool Success, int Attempts, string? Error, long ElapsedMilliseconds);

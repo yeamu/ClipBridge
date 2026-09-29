@@ -1,14 +1,13 @@
 package com.clipbridge
 
 import android.app.Activity
-import android.content.ClipboardManager
 import android.os.Bundle
 import android.widget.Toast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 
 class SyncNowActivity : Activity() {
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
@@ -29,16 +28,23 @@ class SyncNowActivity : Activity() {
         window.decorView.post {
             scope.launch {
                 // Read only after Android grants input focus, without a fixed launch delay.
-                val text = if (ClipboardSyncService.requestManualSync()) {
-                    Toast.makeText(this@SyncNowActivity, "正在同步当前剪贴板", Toast.LENGTH_SHORT).show()
-                    finishAndRemoveTask()
-                    return@launch
-                } else currentClipboardText()
-                val result = when {
-                    text.isNullOrBlank() -> "没有可同步的文本或图片"
-                    else -> withContext(Dispatchers.IO) { OneShotClipboardSync.send(this@SyncNowActivity, text) }
+                if (!ClipboardSyncService.requestManualSync()) {
+                    // Restore the phone listener while this user-opened activity
+                    // still has focus, so text AND images use the normal queue.
+                    val code = getSharedPreferences("clipbridge-settings", MODE_PRIVATE)
+                        .getString("pairingCode", "") ?: ""
+                    if (code.length < 4) {
+                        Toast.makeText(this@SyncNowActivity, "请先设置至少 4 位配对码", Toast.LENGTH_SHORT).show()
+                        finishAndRemoveTask()
+                        return@launch
+                    }
+                    ClipBridgeForegroundService.start(applicationContext)
+                    for (attempt in 1..40) {
+                        delay(50)
+                        if (ClipboardSyncService.requestManualSync()) break
+                    }
                 }
-                Toast.makeText(this@SyncNowActivity, result, Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@SyncNowActivity, SyncRuntime.status.value, Toast.LENGTH_SHORT).show()
                 finishAndRemoveTask()
             }
         }
@@ -48,17 +54,6 @@ class SyncNowActivity : Activity() {
         super.finishAndRemoveTask()
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
-    }
-
-    private fun currentClipboardText(): String? = try {
-        getSystemService(ClipboardManager::class.java)
-            .primaryClip
-            ?.getItemAt(0)
-            ?.coerceToText(this)
-            ?.toString()
-            ?.takeIf { it.isNotBlank() }
-    } catch (_: SecurityException) {
-        null
     }
 
     override fun onDestroy() {

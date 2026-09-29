@@ -10,6 +10,7 @@ import android.net.Uri
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import android.util.Log
+import android.util.JsonWriter
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,7 @@ import java.io.File
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.ServerSocket
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import javax.crypto.Mac
@@ -40,7 +42,6 @@ import javax.crypto.spec.SecretKeySpec
 class ClipboardSyncService(
     private val context: Context,
     private val code: String,
-    private val host: String,
     private val status: (String) -> Unit,
 ) {
     companion object {
@@ -48,7 +49,7 @@ class ClipboardSyncService(
         private var activeService: ClipboardSyncService? = null
 
         // Called from the notification's transient foreground activity.
-        // It returns false only when the app process no longer has a live connection.
+        // A running listener queues the clipboard until Windows reconnects.
         fun requestManualSync(): Boolean {
             val service = activeService ?: return false
             service.syncCurrentClipboard(force = true)
@@ -57,17 +58,14 @@ class ClipboardSyncService(
 
         fun syncWhenAppFocused(): Boolean {
             val service = activeService ?: return false
-            service.syncCurrentClipboard()
+            service.syncCurrentClipboard(force = SyncRuntime.clipboardNeedsFocus.value)
             return true
         }
 
         private const val PORT = 45837
-        private const val CONNECT_TIMEOUT_MS = 5_000
         private const val AUTH_TIMEOUT_MS = 8_000L
         private const val RECONNECT_DELAY_MS = 2_500L
         private const val PING_INTERVAL_MS = 2_000L
-        private const val CLIP_DEBOUNCE_MS = 25L
-        private const val MAX_PENDING_CLIPS = 20
         private const val IMAGE_PREFIX = "clipbridge:png:"
         private const val JPEG_PREFIX = "clipbridge:jpeg:"
         private const val GIF_PREFIX = "clipbridge:gif:"
@@ -78,7 +76,8 @@ class ClipboardSyncService(
     private data class PendingClip(
         val id: String,
         val text: String,
-        val packet: String,
+        val sentAt: Long,
+        val mac: String,
     )
 
     private enum class HandleResult {
@@ -90,18 +89,29 @@ class ClipboardSyncService(
     private val tag = "ClipBridge"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val deviceId = UUID.randomUUID().toString()
-    private val seen = mutableSetOf<String>()
-    private val pendingLock = Any()
+    private val seen = RecentMessageIds()
     private val connectionLock = Any()
     private val outboundSignal = Channel<Unit>(Channel.CONFLATED)
 
     private var clipboard: ClipboardManager? = null
     private var listener: ClipboardManager.OnPrimaryClipChangedListener? = null
-    private val pendingClips = ArrayDeque<PendingClip>()
+    private val pendingClips = BoundedMemoryQueue<PendingClip>({ it.text.length * 2L + 1024 })
+    private data class ClipboardRequest(val item: ClipData.Item, val force: Boolean)
+    private val clipboardRequests = BoundedMemoryQueue<ClipboardRequest>({ (it.item.text?.length ?: 0) * 2L + 1024 })
+    private val clipboardSignal = Channel<Unit>(Channel.CONFLATED)
+    private val controls = Channel<String>(32)
+    private val fileCache = ClipboardFileCache(File(context.cacheDir, "clipboard"))
+    @Volatile private var lastSentId: String? = null
+    @Volatile private var retryAfter = 0L
     private var activeSocket: Socket? = null
+    private var serverSocket: ServerSocket? = null
+    private var wifiEndpoint: WifiEndpoint? = null
+    private var hasSeenWifi = false
+    private val networkChanges = Channel<WifiEndpoint?>(Channel.CONFLATED)
+    private val wifiMonitor = WifiNetworkMonitor(context, ::onWifiChanged)
 
     @Volatile
-    private var lastText: String? = null
+    private var lastHash: String? = null
 
     @Volatile
     private var connectionVerified = false
@@ -114,15 +124,30 @@ class ClipboardSyncService(
         }.also {
             clipboard!!.addPrimaryClipChangedListener(it)
         }
-        scope.launch { connectLoop() }
-        report("已启动，正在连接 Windows…")
+        report("已启动，等待 Wi-Fi IPv4 地址…")
+        scope.launch { listenLoop() }
+        scope.launch {
+            for (signal in clipboardSignal) {
+                while (scope.isActive) {
+                    val request = clipboardRequests.peek() ?: break
+                    onClipboardPayloadRead(request.item, request.force)
+                    clipboardRequests.complete(request)
+                }
+            }
+        }
+        wifiMonitor.start()
     }
 
     fun stop() {
+        wifiMonitor.stop()
+        scope.cancel()
         listener?.let { clipboard?.removePrimaryClipChangedListener(it) }
         listener = null
         connectionVerified = false
         synchronized(connectionLock) {
+            serverSocket?.close()
+            serverSocket = null
+            wifiEndpoint = null
             try {
                 activeSocket?.close()
             } catch (_: Exception) {
@@ -130,7 +155,13 @@ class ClipboardSyncService(
             activeSocket = null
         }
         outboundSignal.close()
-        scope.cancel()
+        clipboardSignal.close()
+        controls.close()
+        pendingClips.clear()
+        clipboardRequests.clear()
+        while (controls.tryReceive().isSuccess) Unit
+        lastHash = null
+        networkChanges.close()
         if (activeService === this) activeService = null
     }
 
@@ -139,41 +170,54 @@ class ClipboardSyncService(
     }
 
     private fun onClipboardChanged(force: Boolean = false) {
+        if (!scope.isActive) return
+        if (!pendingClips.canAccept(1024)) {
+            report("发送队列已满，请等待对端确认后再点按通知。")
+            return
+        }
         try {
-            val text = readClipboardPayload() ?: return
+            // Capture the item while the app has input focus; encoding and sending
+            // run on IO workers so large images do not block the visible activity.
+            val item = clipboard?.primaryClip?.getItemAt(0)
+            if (item == null) {
+                if (force) {
+                    SyncRuntime.clipboardNeedsFocus.value = true
+                    report("剪贴板为空或系统禁止后台读取，请点按通知完成同步。")
+                }
+                return
+            }
+            if (!clipboardRequests.add(ClipboardRequest(item, force))) {
+                report("读取队列已满，请等待处理后再点按通知。")
+                return
+            }
+            clipboardSignal.trySend(Unit)
+            report("正在读取当前剪贴板…")
+        } catch (_: SecurityException) {
+            SyncRuntime.clipboardNeedsFocus.value = true
+            report("系统暂未允许读取剪贴板，请点按通知重试。")
+        }
+    }
 
-            if (!force && text == lastText) return
-            lastText = text
-
+    private fun onClipboardPayloadRead(item: ClipData.Item, force: Boolean) {
+        try {
+            if (!pendingClips.canAccept(1024)) { report("发送队列已满，请等待发送后重试。"); return }
+            val text = readClipboardPayload(item) ?: return
+            if (!scope.isActive) return
+            val hash = PayloadIdentity.hash(text)
+            SyncRuntime.clipboardNeedsFocus.value = false
+            if (!force && hash == lastHash) return
             val id = UUID.randomUUID().toString()
             val sentAt = System.currentTimeMillis()
-            val packet = JSONObject().apply {
-                put("Type", "clip")
-                put(
-                    "Message",
-                    JSONObject().apply {
-                        put("Id", id)
-                        put("OriginDeviceId", deviceId)
-                        put("Text", text)
-                        put("SentAt", sentAt)
-                    },
-                )
-                put("Mac", proof("clip|$id|$deviceId|$text|$sentAt"))
+            val mac = PayloadIdentity.mac(code, "clip|$id|$deviceId|", text, "|$sentAt")
+            if (!pendingClips.add(PendingClip(id, text, sentAt, mac))) {
+                report("发送队列已满，请等待发送后再点按通知；大图片单独发送，避免积压内存。")
+                return
             }
-            val pending = PendingClip(id, text, packet.toString())
-            synchronized(seen) { seen.add(id) }
-            synchronized(pendingLock) {
-                if (pendingClips.size == MAX_PENDING_CLIPS) pendingClips.removeFirst()
-                pendingClips.addLast(pending)
-            }
+            lastHash = hash
             outboundSignal.trySend(Unit)
-
-            if (connectionVerified) {
-                report("已读取手机剪贴板，已加入发送队列…")
-            } else {
-                report("已保存剪贴板，连接后按顺序发送。")
-            }
+            report(if (connectionVerified) "已读取手机剪贴板，等待对端确认…" else "内容保留在内存中，连接后按顺序发送。")
         } catch (_: SecurityException) {
+            SyncRuntime.clipboardNeedsFocus.value = true
             report("系统暂未允许读取剪贴板，请保持 ClipBridge 在前台后重试。")
         } catch (exception: Exception) {
             Log.w(tag, "Clipboard read failed", exception)
@@ -181,35 +225,87 @@ class ClipboardSyncService(
         }
     }
 
-    private suspend fun connectLoop() {
-        while (scope.isActive) {
-            try {
-                val socket = Socket()
-                synchronized(connectionLock) { activeSocket = socket }
-                try {
-                    socket.connect(InetSocketAddress(host, PORT), CONNECT_TIMEOUT_MS)
-                    runConnection(socket)
-                } finally {
-                    connectionVerified = false
-                    synchronized(connectionLock) {
-                        if (activeSocket === socket) activeSocket = null
-                    }
-                    try {
-                        socket.close()
-                    } catch (_: Exception) {
-                    }
-                }
-            } catch (exception: Exception) {
-                if (scope.isActive) {
-                    Log.w(tag, "Connect attempt failed", exception)
-                    report("等待 Windows（确认 IP、同一 Wi-Fi 和防火墙）…")
+    private fun onWifiChanged(endpoint: WifiEndpoint?) {
+        val force = synchronized(connectionLock) {
+            if (!scope.isActive || wifiEndpoint == endpoint) return
+            val hadWifi = hasSeenWifi
+            if (endpoint != null) hasSeenWifi = true
+            wifiEndpoint = endpoint
+            connectionVerified = false
+            serverSocket?.close()
+            serverSocket = null
+            activeSocket?.let(::closeSocket)
+            activeSocket = null
+            hadWifi
+        }
+        networkChanges.trySend(endpoint)
+        if (endpoint == null) {
+            report("Wi-Fi 已断开，等待重新连接…")
+        } else {
+            // One request per network/address change; repeated link callbacks are
+            // deduplicated by the monitor. Queue it until a verified PC connects.
+            scope.launch(Dispatchers.Main) {
+                if (synchronized(connectionLock) { wifiEndpoint == endpoint }) {
+                    syncCurrentClipboard(force = force)
                 }
             }
-            if (scope.isActive) delay(RECONNECT_DELAY_MS)
+        }
+    }
+
+    private suspend fun listenLoop() {
+        for (endpoint in networkChanges) {
+            if (endpoint == null) continue
+            while (scope.isActive && synchronized(connectionLock) { wifiEndpoint == endpoint }) {
+                val server = ServerSocket()
+                try {
+                    synchronized(connectionLock) {
+                        if (!scope.isActive || wifiEndpoint != endpoint) return@synchronized
+                        server.reuseAddress = true
+                        server.bind(InetSocketAddress(endpoint.address, PORT))
+                        serverSocket = server
+                    }
+                    if (!server.isBound) break
+                    report("手机 IP：${endpoint.address.hostAddress}，等待 Windows 连接…")
+                    while (scope.isActive && !server.isClosed) {
+                        val socket = server.accept()
+                        synchronized(connectionLock) {
+                            if (wifiEndpoint != endpoint || !scope.isActive) closeSocket(socket)
+                            else activeSocket = socket
+                        }
+                        if (socket.isClosed) continue
+                        try {
+                            socket.tcpNoDelay = true
+                            socket.soTimeout = 120_000
+                            runConnection(socket)
+                        } catch (exception: Exception) {
+                            if (scope.isActive && !server.isClosed) Log.w(tag, "Connection ended", exception)
+                        } finally {
+                            connectionVerified = false
+                            synchronized(connectionLock) {
+                                if (activeSocket === socket) activeSocket = null
+                            }
+                            closeSocket(socket)
+                        }
+                    }
+                } catch (exception: Exception) {
+                    if (scope.isActive && synchronized(connectionLock) { wifiEndpoint == endpoint }) {
+                        Log.w(tag, "Listener failed", exception)
+                        report("手机监听失败，将自动重试：${exception.message}")
+                    }
+                } finally {
+                    server.close()
+                    synchronized(connectionLock) {
+                        if (serverSocket === server) serverSocket = null
+                    }
+                }
+                if (scope.isActive && synchronized(connectionLock) { wifiEndpoint == endpoint })
+                    delay(RECONNECT_DELAY_MS)
+            }
         }
     }
 
     private suspend fun runConnection(socket: Socket) = coroutineScope {
+        lastSentId = null
         val writer = socket.getOutputStream().bufferedWriter(StandardCharsets.UTF_8)
         if (!writeLine(writer, hello())) throw IOException("握手发送失败")
         report("网络已连接，正在验证配对码…")
@@ -236,6 +332,7 @@ class ClipboardSyncService(
                     lines.forEach { line ->
                         when (handle(line)) {
                             HandleResult.VERIFIED -> {
+                                connectionVerified = true
                                 if (!verified.isCompleted) verified.complete(Unit)
                             }
 
@@ -250,42 +347,45 @@ class ClipboardSyncService(
                 }
         } finally {
             connectionVerified = false
-            sender.cancelAndJoin()
             closeSocket(socket)
-            if (scope.isActive) report("连接已断开，正在重连…")
+            sender.cancelAndJoin()
+            if (scope.isActive) report("连接已断开，等待 Windows 重新连接…")
         }
     }
 
     private suspend fun senderLoop(socket: Socket, writer: BufferedWriter) {
         while (currentCoroutineContext().isActive && !socket.isClosed) {
-            val signalled = withTimeoutOrNull(PING_INTERVAL_MS) {
-                outboundSignal.receiveCatching().getOrNull()
+            val signalled = withTimeoutOrNull(PING_INTERVAL_MS) { outboundSignal.receiveCatching().getOrNull() }
+            if (signalled == null && !writeLine(writer, JSONObject().put("Type", "ping").toString()))
+                throw IOException("心跳发送失败")
+            while (true) {
+                val control = controls.tryReceive().getOrNull() ?: break
+                if (!writeLine(writer, control)) throw IOException("确认消息发送失败")
             }
-
-            if (signalled == null) {
-                if (!writeLine(writer, JSONObject().put("Type", "ping").toString())) {
-                    throw IOException("心跳发送失败")
-                }
-                continue
-            }
-
-            // Briefly gather callbacks from one multi-selection copy, then retain
-            // each resulting clip in FIFO order.
-            delay(CLIP_DEBOUNCE_MS)
-            while (outboundSignal.tryReceive().isSuccess) Unit
-
-            while (currentCoroutineContext().isActive && !socket.isClosed) {
-                val candidate = synchronized(pendingLock) { pendingClips.firstOrNull() } ?: break
-                if (!writeLine(writer, candidate.packet)) {
-                    // Keep every queued clip for the next verified connection.
-                    throw IOException("剪贴板发送失败")
-                }
-                synchronized(pendingLock) {
-                    if (pendingClips.firstOrNull() === candidate) pendingClips.removeFirst()
-                }
-                report("已发送到 Windows（${candidate.text.length} 个字符）。")
-            }
+            val candidate = pendingClips.peek() ?: continue
+            if (candidate.id == lastSentId && System.currentTimeMillis() < retryAfter) continue
+            lastSentId = candidate.id
+            retryAfter = System.currentTimeMillis() + 120_000
+            // Stream JSON encoding; never retain a second serialized image string.
+            val json = JsonWriter(writer)
+            json.beginObject().name("Type").value("clip")
+                .name("Message").beginObject().name("Id").value(candidate.id)
+                .name("OriginDeviceId").value(deviceId).name("Text").value(candidate.text)
+                .name("SentAt").value(candidate.sentAt).endObject()
+                .name("Mac").value(candidate.mac).endObject()
+            writer.newLine()
+            writer.flush()
+            // The authenticated ACK removes the item; failures keep it in RAM.
         }
+    }
+
+    private fun acknowledge(id: String, success: Boolean) {
+        val packet = JSONObject().put("Type", "ack").put("Id", id).put("Success", success)
+            .put("Proof", proof("ack|$id|$success")).toString()
+        if (!controls.trySend(packet).isSuccess) {
+            synchronized(connectionLock) { activeSocket?.let(::closeSocket) }
+        }
+        outboundSignal.trySend(Unit)
     }
 
     private fun hello() = JSONObject().apply {
@@ -311,6 +411,23 @@ class ClipboardSyncService(
                 return HandleResult.VERIFIED
             }
 
+            if (!connectionVerified) return HandleResult.NONE
+            if (packet.optString("Type") == "ack") {
+                val id = packet.getString("Id")
+                val success = packet.getBoolean("Success")
+                if (packet.optString("Proof") != proof("ack|$id|$success")) return HandleResult.NONE
+                val pending = pendingClips.peek() ?: return HandleResult.NONE
+                if (pending.id != id) return HandleResult.NONE
+                if (success) {
+                    pendingClips.complete(pending)
+                    report("Windows 已确认接收，已释放该项发送内存。")
+                } else {
+                    retryAfter = System.currentTimeMillis() + 30_000
+                    report("Windows 暂时无法写入剪贴板，内容仍在内存中，稍后自动重试。")
+                }
+                outboundSignal.trySend(Unit)
+                return HandleResult.NONE
+            }
             if (packet.optString("Type") != "clip") return HandleResult.NONE
             val message = packet.getJSONObject("Message")
             val id = message.getString("Id")
@@ -319,27 +436,42 @@ class ClipboardSyncService(
             val sentAt = message.getLong("SentAt")
             if (
                 origin == deviceId ||
-                packet.getString("Mac") != proof("clip|$id|$origin|$text|$sentAt") ||
-                !synchronized(seen) { seen.add(id) }
+                packet.getString("Mac") != PayloadIdentity.mac(code, "clip|$id|$origin|", text, "|$sentAt")
             ) {
                 return HandleResult.NONE
             }
 
-            if (lastText != text) {
-                lastText = text
-                applyClipboardPayload(text)
+            if (seen.contains(id)) { acknowledge(id, true); return HandleResult.NONE }
+            val hash = PayloadIdentity.hash(text)
+            val previous = lastHash
+            try {
+                if (hash != lastHash) {
+                    lastHash = hash
+                    if (!applyClipboardPayload(text)) throw IOException("不支持的图片格式或图片超过上限")
+                }
+                seen.add(id)
+                acknowledge(id, true)
+                report("已收到 Windows 剪贴板。")
+            } catch (exception: Exception) {
+                lastHash = previous
+                acknowledge(id, false)
+                report("写入剪贴板失败，对端将保留内容重试：${exception.message}")
             }
-            report("已收到 Windows 剪贴板。")
         } catch (exception: Exception) {
             Log.w(tag, "Packet handling failed", exception)
         }
         return HandleResult.NONE
     }
 
-    private fun readClipboardPayload(): String? {
-        val item = clipboard?.primaryClip?.getItemAt(0) ?: return null
+    private fun readClipboardPayload(item: ClipData.Item): String? {
         val uri = item.uri
         if (uri != null) {
+            val knownBytes = runCatching { context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1 }.getOrDefault(-1)
+            if (knownBytes > MAX_IMAGE_BYTES) { report("原始图片超过 100 MB，未同步。"); return null }
+            if (knownBytes > 0 && !pendingClips.canAccept(((knownBytes + 2) / 3) * 8 + 1024)) {
+                report("图片超出当前剩余队列容量，请等待发送后重试。")
+                return null
+            }
             var sourceTooLarge = false
             val source = context.contentResolver.openInputStream(uri)?.use { input ->
                 val output = ByteArrayOutputStream(); val buffer = ByteArray(8192); var total = 0
@@ -481,14 +613,14 @@ class ClipboardSyncService(
             "webp", "heic", "heif", "avif", "ico",
         )
 
-    private fun applyClipboardPayload(payload: String) {
+    private fun applyClipboardPayload(payload: String): Boolean {
         if (
             !payload.startsWith(IMAGE_PREFIX) &&
             !payload.startsWith(JPEG_PREFIX) &&
             !payload.startsWith(GIF_PREFIX) &&
             !payload.startsWith(RAW_IMAGE_PREFIX)
         ) {
-            clipboard?.setPrimaryClip(ClipData.newPlainText("ClipBridge", payload)); return
+            clipboard?.setPrimaryClip(ClipData.newPlainText("ClipBridge", payload)); return true
         }
         val isGif = payload.startsWith(GIF_PREFIX)
         val isJpeg = payload.startsWith(JPEG_PREFIX)
@@ -498,19 +630,20 @@ class ClipboardSyncService(
         } else {
             -1
         }
-        if (isRawImage && rawSeparator <= RAW_IMAGE_PREFIX.length) return
+        if (isRawImage && rawSeparator <= RAW_IMAGE_PREFIX.length) return false
         val rawExtension = if (rawSeparator > RAW_IMAGE_PREFIX.length) {
             payload.substring(RAW_IMAGE_PREFIX.length, rawSeparator).lowercase()
         } else null
-        if (rawExtension != null && !isSupportedImageExtension(rawExtension)) return
+        if (rawExtension != null && !isSupportedImageExtension(rawExtension)) return false
         val prefix = when {
             isGif -> GIF_PREFIX
             isJpeg -> JPEG_PREFIX
             rawExtension != null -> payload.substring(0, rawSeparator + 1)
             else -> IMAGE_PREFIX
         }
+        if (payload.length - prefix.length > ((MAX_IMAGE_BYTES + 2L) / 3) * 4) return false
         var bytes = android.util.Base64.decode(payload.removePrefix(prefix), android.util.Base64.NO_WRAP)
-        if (bytes.size > MAX_IMAGE_BYTES) return
+        if (bytes.size > MAX_IMAGE_BYTES) return false
         val requiresPng = rawExtension == "heic" || rawExtension == "heif"
         if (requiresPng) {
             val bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(java.nio.ByteBuffer.wrap(bytes))) { decoder, _, _ ->
@@ -520,7 +653,7 @@ class ClipboardSyncService(
                 encodeStaticImage(bitmap, pngOnly = true)
             } finally {
                 bitmap.recycle()
-            } ?: run { report("HEIC/HEIF 转换为 PNG 后超过 100 MB，未同步。"); return }
+            } ?: run { report("HEIC/HEIF 转换为 PNG 后超过 100 MB，未同步。"); return false }
             bytes = encoded.second
         }
         val folder = File(context.cacheDir, "clipboard").apply { mkdirs() }
@@ -531,9 +664,17 @@ class ClipboardSyncService(
             rawExtension != null -> rawExtension
             else -> "png"
         }
-        val image = File(folder, "remote-${System.currentTimeMillis()}.$extension").apply { writeBytes(bytes) }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", image)
-        clipboard?.setPrimaryClip(ClipData.newUri(context.contentResolver, "ClipBridge image", uri))
+        val image = File(folder, "remote-${UUID.randomUUID()}.$extension")
+        try {
+            image.writeBytes(bytes)
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", image)
+            clipboard?.setPrimaryClip(ClipData.newUri(context.contentResolver, "ClipBridge image", uri))
+        } catch (exception: Exception) {
+            image.delete()
+            throw exception
+        }
+        runCatching { fileCache.cleanup(setOf(image.name)) }
+        return true
     }
 
     private fun writeLine(writer: BufferedWriter, text: String): Boolean = try {
@@ -553,6 +694,7 @@ class ClipboardSyncService(
     }
 
     private fun report(message: String) {
+        if (!scope.isActive) return
         Log.i(tag, message)
         status(message)
     }

@@ -3,6 +3,8 @@
 最后更新：2026-07-23  
 工作区：仓库根目录
 
+> 2026-09-29 v1.3 兼容性更新：已改为 Android 自动获取 Wi-Fi IPv4 并监听 TCP 45837，Windows 主动连接手机。本文其余内容记录旧版本的桌面服务端方案；若对接当前 Android，macOS 也需改为填写手机 IP 的 TCP 客户端及断线重连，不应直接照搬下文服务端角色。JSON/HMAC 协议仍见 [protocol/PROTOCOL.md](protocol/PROTOCOL.md)。
+
 ## 1. 交接状态
 
 macOS 端尚未创建源码。Windows 与 Android 1.2.2 已完成文字、原始图片和 GIF 动画双向同步，可作为 macOS 端联调基准。

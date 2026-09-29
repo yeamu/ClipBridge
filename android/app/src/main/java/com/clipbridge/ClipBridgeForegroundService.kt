@@ -17,18 +17,21 @@ class ClipBridgeForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val settings = getSharedPreferences("clipbridge-settings", Context.MODE_PRIVATE)
-        val host = settings.getString("windowsIp", "") ?: ""
         val code = settings.getString("pairingCode", "") ?: ""
-        if (host.isBlank() || code.length < 4) {
-            SyncRuntime.report("请先配置 Windows IP 和至少 4 位配对码。")
+        if (code.length < 4) {
+            SyncRuntime.report("请先配置至少 4 位配对码。")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        sync?.stop()
-        sync = ClipboardSyncService(applicationContext, code, host) { SyncRuntime.report(it) }
-        sync!!.start()
-        SyncRuntime.running.value = true
+        if (sync == null) {
+            SyncRuntime.clipboardNeedsFocus.value = false
+            sync = ClipboardSyncService(applicationContext, code) {
+                SyncRuntime.report(it)
+            }
+            sync!!.start()
+            SyncRuntime.running.value = true
+        }
         return START_STICKY
     }
 
@@ -36,6 +39,7 @@ class ClipBridgeForegroundService : Service() {
         sync?.stop()
         sync = null
         SyncRuntime.running.value = false
+        SyncRuntime.clipboardNeedsFocus.value = false
         QuickSyncNotification.cancel(this)
         super.onDestroy()
     }

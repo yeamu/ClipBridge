@@ -6,7 +6,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Icon
-import android.graphics.BitmapFactory
 
 object QuickSyncNotification {
     private const val channelId = "clipbridge-quick-sync"
@@ -41,20 +40,12 @@ object QuickSyncNotification {
             Intent(context, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-
         return android.app.Notification.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_stat_clipbridge)
-            .setLargeIcon(BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher))
             .setContentTitle("点击同步到电脑")
+            .setOnlyAlertOnce(true)
             .setContentIntent(action)
             .setOngoing(true)
-            .addAction(
-                android.app.Notification.Action.Builder(
-                    Icon.createWithResource(context, R.drawable.ic_stat_clipbridge),
-                    "同步到电脑",
-                    action,
-                ).build(),
-            )
             .addAction(
                 android.app.Notification.Action.Builder(
                     Icon.createWithResource(context, R.drawable.ic_stat_clipbridge),
@@ -63,10 +54,6 @@ object QuickSyncNotification {
                 ).build(),
             )
             .build()
-    }
-
-    fun show(context: Context) {
-        ensureChannel(context).notify(notificationId, build(context))
     }
 
     fun cancel(context: Context) {

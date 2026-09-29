@@ -9,6 +9,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -20,7 +22,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val preferences = remember { getSharedPreferences("clipbridge-settings", MODE_PRIVATE) }
-            var windowsIp by remember { mutableStateOf(preferences.getString("windowsIp", "") ?: "") }
+            var phoneIp by remember { mutableStateOf<String?>(null) }
+            DisposableEffect(Unit) {
+                val monitor = WifiNetworkMonitor(applicationContext) { endpoint ->
+                    runOnUiThread { phoneIp = endpoint?.address?.hostAddress }
+                }
+                monitor.start()
+                onDispose { monitor.stop() }
+            }
             var code by remember { mutableStateOf(preferences.getString("pairingCode", "") ?: "") }
             val status by SyncRuntime.status.collectAsState()
             val running by SyncRuntime.running.collectAsState()
@@ -44,20 +53,21 @@ class MainActivity : ComponentActivity() {
                     startSync()
                 }
             }
-            MaterialTheme { Surface(modifier = Modifier.fillMaxSize()) { Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            MaterialTheme { Surface(modifier = Modifier.fillMaxSize()) { Column(Modifier.verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("ClipBridge", style = MaterialTheme.typography.headlineMedium)
-                Text("Windows 电脑的局域网 IP")
-                OutlinedTextField(value = windowsIp, onValueChange = { windowsIp = it; preferences.edit().putString("windowsIp", it).apply() }, modifier = Modifier.fillMaxWidth(), singleLine = true, placeholder = { Text("例如 192.168.1.20") })
+                Text("本机 Wi-Fi IP（自动获取）")
+                OutlinedTextField(value = phoneIp ?: "尚未连接 Wi-Fi / 未获取 IPv4", onValueChange = {}, readOnly = true, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Text("在 Windows 端填写此 IP。切换 Wi-Fi 后自动尝试同步一次；IP 改变时请更新 Windows 设置。", style = MaterialTheme.typography.bodySmall)
                 Text("配对码（至少 4 位）")
-                OutlinedTextField(value = code, onValueChange = { code = it; preferences.edit().putString("pairingCode", it).apply() }, modifier = Modifier.fillMaxWidth(), singleLine = true, visualTransformation = PasswordVisualTransformation())
+                OutlinedTextField(value = code, onValueChange = { code = it; preferences.edit().putString("pairingCode", it).apply() }, enabled = !running, modifier = Modifier.fillMaxWidth(), singleLine = true, visualTransformation = PasswordVisualTransformation())
                 Button(onClick = {
                     if (running) {
                         ClipBridgeForegroundService.stop(applicationContext)
                         SyncRuntime.report("已停止。")
                     }
-                    else if (code.length < 4 || windowsIp.isBlank()) SyncRuntime.report("请输入 Windows IP 和至少 4 位配对码。")
+                    else if (code.length < 4) SyncRuntime.report("请输入至少 4 位配对码。")
                     else {
-                        preferences.edit().putString("windowsIp", windowsIp).putString("pairingCode", code).apply()
+                        preferences.edit().putString("pairingCode", code).remove("windowsIp").apply()
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                             waitingForNotificationPermission = true

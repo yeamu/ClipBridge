@@ -5,12 +5,19 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\clipbridge.ico</ApplicationIcon>
-    <Version>1.2.3</Version>
-    <AssemblyVersion>1.2.3.0</AssemblyVersion>
-    <FileVersion>1.2.3.0</FileVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- WPF owns startup; WinForms' Application.SetHighDpiMode is too late here. -->
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <Version>1.3.0</Version>
+    <AssemblyVersion>1.3.0.0</AssemblyVersion>
+    <FileVersion>1.3.0.0</FileVersion>
     <DebugType>None</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
+    <EmbeddedResource Include="Assets\clipbridge.ico" LogicalName="ClipBridge.TrayIcon.ico" />
+  </ItemGroup>
 </Project>

@@ -24,7 +24,7 @@ val hasReleaseKeystore =
         !releaseKeyPassword.isNullOrBlank()
 
 android { namespace = "com.clipbridge"; compileSdk = 35
-    defaultConfig { applicationId = "com.clipbridge.app"; minSdk = 29; targetSdk = 35; versionCode = 106; versionName = "1.2.3" }
+    defaultConfig { applicationId = "com.clipbridge.app"; minSdk = 29; targetSdk = 35; versionCode = 107; versionName = "1.3.0" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
@@ -33,7 +33,7 @@ android { namespace = "com.clipbridge"; compileSdk = 35
     signingConfigs {
         create("release") {
             if (hasReleaseKeystore) {
-                storeFile = file(releaseStoreFile!!)
+                storeFile = rootProject.file(releaseStoreFile!!)
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
@@ -56,6 +56,8 @@ android { namespace = "com.clipbridge"; compileSdk = 35
     }
 }
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.13")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../ClipBridge.Windows/TrayIconImage.cs" Link="TrayIconImage.cs" />
+    <EmbeddedResource Include="../ClipBridge.Windows/Assets/clipbridge.ico" LogicalName="ClipBridge.TrayIcon.ico" />
+  </ItemGroup>
+</Project>

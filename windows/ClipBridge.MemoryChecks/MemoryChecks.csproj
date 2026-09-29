@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../ClipBridge.Windows/BoundedMemoryQueue.cs" Link="BoundedMemoryQueue.cs" />
+    <Compile Include="../ClipBridge.Windows/PayloadIdentity.cs" Link="PayloadIdentity.cs" />
+    <Compile Include="../ClipBridge.Windows/RecentMessageIds.cs" Link="RecentMessageIds.cs" />
+    <Compile Include="../ClipBridge.Windows/ClipboardFileCache.cs" Link="ClipboardFileCache.cs" />
+    <Compile Include="../ClipBridge.Windows/ClipTransport.cs" Link="ClipTransport.cs" />
+    <Compile Include="../ClipBridge.Windows/PayloadCodec.cs" Link="PayloadCodec.cs" />
+    <Compile Include="../ClipBridge.Windows/TransferMemory.cs" Link="TransferMemory.cs" />
+    <Compile Include="../ClipBridge.Windows/JsonLineReader.cs" Link="JsonLineReader.cs" />
+  </ItemGroup>
+</Project>
